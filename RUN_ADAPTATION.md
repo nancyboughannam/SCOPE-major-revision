@@ -16,8 +16,13 @@ Stop any existing optimizer launcher with Ctrl+C first. From `FLaskAPIs`, run:
 ```
 
 The command runs Python and Java itself. Keep the terminal open and do not
-start Java or another optimizer separately. A JDK with its compiler module
-must be available through `java` on PATH. The existing Python dependencies
+start Java or another optimizer separately. CloudSim requires JDK 21 or newer
+with its compiler module. The runner checks the compiler version before
+creating outputs. It tries JAVA_HOME and PATH and, on macOS, registered JDKs
+and standard Homebrew locations. It prints and records the selected executable.
+Use `--java /absolute/path/to/jdk/Contents/Home/bin/java` to select a specific
+installation; an incompatible explicit choice is rejected without substitution.
+The existing Python dependencies
 and compatible v4 models are required; this experiment does not retrain them.
 
 ## Prespecified experiment

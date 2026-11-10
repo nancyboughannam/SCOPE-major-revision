@@ -28,6 +28,50 @@ THREE = ROOT/'ThreeBrains'
 PACKAGE = 'edu/boun/edgecloudsim/applications/sample_app5'
 
 
+def java_candidates(explicit=None):
+    if explicit:
+        return [str(Path(explicit).expanduser())]
+    candidates = []
+    if os.environ.get('JAVA_HOME'):
+        candidates.append(str(Path(os.environ['JAVA_HOME'])/'bin/java'))
+    if shutil.which('java'):
+        candidates.append(shutil.which('java'))
+    if sys.platform == 'darwin':
+        try:
+            found = subprocess.run(['/usr/libexec/java_home'], capture_output=True,
+                                   text=True, timeout=10)
+            if found.returncode == 0 and found.stdout.strip():
+                candidates.append(str(Path(found.stdout.strip())/'bin/java'))
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        for parent, pattern in (
+                (Path('/Library/Java/JavaVirtualMachines'), '*/Contents/Home/bin/java'),
+                (Path.home()/'Library/Java/JavaVirtualMachines', '*/Contents/Home/bin/java'),
+                (Path('/opt/homebrew/opt'), 'openjdk*/bin/java'),
+                (Path('/usr/local/opt'), 'openjdk*/bin/java')):
+            candidates.extend(str(path) for path in sorted(parent.glob(pattern)))
+    return list(dict.fromkeys(candidates))
+
+
+def select_java(explicit=None):
+    checked = []
+    for candidate in java_candidates(explicit):
+        try:
+            result = subprocess.run(
+                [candidate, '-m', 'jdk.compiler/com.sun.tools.javac.Main', '-version'],
+                capture_output=True, text=True, timeout=10)
+            version = re.search(r'\bjavac\s+(\d+)', result.stdout+'\n'+result.stderr)
+            if result.returncode == 0 and version and int(version[1]) >= 21:
+                executable = str(Path(shutil.which(candidate) or candidate).resolve())
+                return executable, int(version[1])
+            checked.append(candidate+(': JDK '+version[1] if version else ': compiler unavailable'))
+        except (OSError, subprocess.TimeoutExpired):
+            checked.append(candidate+': executable unavailable')
+    raise ValueError('This CloudSim dependency requires JDK 21 or newer with a compiler. '
+                     'Use --java /path/to/jdk/Contents/Home/bin/java to select one explicitly. '
+                     'Checked: '+('; '.join(checked) or 'no Java installations found'))
+
+
 def sha256(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
@@ -142,6 +186,7 @@ def main():
     p.add_argument('--output', type=Path, required=True)
     p.add_argument('--config', type=Path, default=THREE/'scripts/sample_app5/config/default_config.properties')
     p.add_argument('--catalogue', type=Path, default=BASE/'scope_candidate_dataset/candidate_dataset_train.csv')
+    p.add_argument('--java', type=Path, help='Explicit JDK 21+ java executable; otherwise discover an installed JDK.')
     p.add_argument('--iteration', type=int, default=1004)
     p.add_argument('--vehicles', type=int, default=1200)
     p.add_argument('--minutes', type=float, default=60)
@@ -160,16 +205,16 @@ def main():
     output = args.output.resolve()
     if output.exists() or output.with_suffix('.zip').exists():
         p.error('Use a fresh output directory and ZIP name')
-    java = shutil.which('java')
-    if not java:
-        p.error('Install/select a JDK first: java must be on PATH')
+    try:
+        java, java_major = select_java(args.java)
+    except ValueError as error:
+        p.error(str(error))
+    print(f'Using JDK {java_major}: {java}', flush=True)
     compiler = [java, '-m', 'jdk.compiler/com.sun.tools.javac.Main']
     libraries = sorted((THREE/'lib').glob('*.jar'))
     if not libraries:
         p.error('No Java dependencies found in ThreeBrains/lib')
     library_path = os.pathsep.join(str(f) for f in libraries)
-    # Verify the selected Java includes a compiler before creating outputs.
-    subprocess.run(compiler+['-version'], check=True)
     models, catalogue, config = args.models.resolve(), args.catalogue.resolve(), args.config.resolve()
     manifest = json.loads((models/'model_manifest.json').read_text())
     normalization, source = manifest_support(manifest)
@@ -208,7 +253,7 @@ def main():
                 freeze_seconds=args.shift_seconds, penalty=args.penalty, r_max=.15,
                 modes=['adaptive','frozen'], normalization=normalization, input_sha256=hashes,
                 interpretation='Development paired control; no best-static or overhead claim',
-                python=sys.executable)
+                python=sys.executable, java_executable=java, java_major=java_major)
     write_json(output/'experiment.json', plan)
     print('Compiling an isolated Java build...', flush=True)
     with (output/'compile.log').open('w') as log:
