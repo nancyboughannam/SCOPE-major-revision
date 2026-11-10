@@ -6,6 +6,12 @@ The Java orchestrator writes one row per application and configuration window.
 This script keeps only finalized windows, verifies the targets, and splits by
 independent simulation run so rows from the same run cannot leak across the
 training, validation, and test sets.
+cd ~/Documents/SCOPE-major-revision/FLaskAPIs
+
+./.venv-revision/bin/python prepare_candidate_dataset.py \
+  --input revision_training_v3/scope_candidate_windows_raw.csv \
+  --output-dir revision_training_v3/dataset \
+  --seed 42
 """
 
 from __future__ import annotations

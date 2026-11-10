@@ -1,0 +1,24 @@
+2026-11-07 16:04:59,750 - [EXP3-MC-ADAPTED] Loaded 3000 unique catalogue configurations; using at most 5 arms selected with seed 20260828. QoS threshold=0.200, weights=(failure=0.50, service=0.50), eta=0.100
+test_delayed_original_arm (test_exp3_revision.Tests.test_delayed_original_arm) ... ok
+test_duplicate (test_exp3_revision.Tests.test_duplicate) ... ok
+test_empty (test_exp3_revision.Tests.test_empty) ... ok
+test_empty_class_weight (test_exp3_revision.Tests.test_empty_class_weight) ... ok
+test_explicit_eta (test_exp3_revision.Tests.test_explicit_eta) ... ok
+test_failed_batch_does_not_commit (test_exp3_revision.Tests.test_failed_batch_does_not_commit) ... ok
+test_five_arm_subset_preserved (test_exp3_revision.Tests.test_five_arm_subset_preserved) ... ok
+test_full_eta (test_exp3_revision.Tests.test_full_eta) ... ok
+test_http (test_exp3_revision.Tests.test_http) ... 2026-11-07 16:04:59,834 - [EXP3-MC-ADAPTED] run=test|seed=42|devices=100 time=10.0 cost=0.029994200385982706 reward=0.9700057996140173 trigger=False arm=0->0 switched=False reconfigurations=0
+ok
+test_incomplete (test_exp3_revision.Tests.test_incomplete) ... ok
+test_initial_probability (test_exp3_revision.Tests.test_initial_probability) ... ok
+test_log_names (test_exp3_revision.Tests.test_log_names) ... ok
+test_nested_subsets (test_exp3_revision.Tests.test_nested_subsets) ... ok
+test_protocol (test_exp3_revision.Tests.test_protocol) ... ok
+test_restart_unknown (test_exp3_revision.Tests.test_restart_unknown) ... ok
+test_retention (test_exp3_revision.Tests.test_retention) ... ok
+test_sample_probability (test_exp3_revision.Tests.test_sample_probability) ... ok
+
+----------------------------------------------------------------------
+Ran 17 tests in 0.105s
+
+OK

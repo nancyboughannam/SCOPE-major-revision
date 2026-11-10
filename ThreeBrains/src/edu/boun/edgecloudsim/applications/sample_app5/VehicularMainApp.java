@@ -43,7 +43,7 @@ public class VehicularMainApp {
         SimLogger.enablePrintLog();
 
         // Default simulation parameters
-        int iterationNumber = 1;
+        int iterationNumber = 15;
         String configFile = "";
         String outputFolder = "";
         String edgeDevicesFile = "";

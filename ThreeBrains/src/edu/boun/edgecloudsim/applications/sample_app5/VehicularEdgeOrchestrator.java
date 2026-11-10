@@ -93,6 +93,8 @@ public class VehicularEdgeOrchestrator extends EdgeOrchestrator {
     private double currentAlpha = 0.6;
 
  
+    private final Exp3FeedbackTracker exp3Feedback = new Exp3FeedbackTracker();
+
     private Map<String, Integer> taskDecisionMap = new ConcurrentHashMap<>();
     private int[] lagTasksPerType = new int[NUM_APP_TYPES]; //  Lag Tracking
 
@@ -121,6 +123,60 @@ public class VehicularEdgeOrchestrator extends EdgeOrchestrator {
     private String trainingRunId;
 
     private Random simulationRandom;
+
+    // Selected at routing, revalidated after WLAN upload. No VM reservation.
+    private final Map<String, EdgeVM> plannedEdgeVms = new java.util.HashMap<>();
+    private final List<EdgeVM> availableEdgeVms = new java.util.ArrayList<>();
+    private final Map<Integer, Long> edgeVmSelections = new java.util.HashMap<>();
+    private boolean edgeInventoryReady = false;
+    private final Map<Integer, String> edgeVmMetadata = new java.util.HashMap<>();
+    private long edgePlans, retainedEdgePlans, reselectedEdgePlans, noEligibleAtAssignment;
+
+    private String edgeTaskKey(Task task) {
+        return task.getMobileDeviceId() + "_" + task.getCloudletId();
+    }
+
+    private void initializeEdgeVmInventory() {
+        plannedEdgeVms.clear(); availableEdgeVms.clear(); edgeVmSelections.clear();
+        edgePlans = retainedEdgePlans = reselectedEdgePlans = noEligibleAtAssignment = 0;
+        for (Datacenter dc : SimManager.getInstance().getEdgeServerManager().getDatacenterList()) {
+            for (org.cloudbus.cloudsim.Host host : dc.getHostList()) {
+                for (Vm vm : host.getVmList()) {
+                    if (vm instanceof EdgeVM) {
+                        availableEdgeVms.add((EdgeVM) vm);
+                        edgeVmMetadata.put(vm.getId(), host.getId() + "," + host.getVmList().indexOf(vm));
+                    }
+                }
+            }
+        }
+        edgeInventoryReady = true;
+        SimLogger.printLine("EDGE_VM_INVENTORY policy=" + policy
+                + " selectable_vms=" + availableEdgeVms.size());
+    }
+
+    private void writeEdgeVmSelectionAudit() {
+        if (!(policy.equals("RAIDER_TRAX") || usesRtOptLogic())) return;
+        String folder = SimLogger.getInstance().getOutputFolder();
+        SimLogger.printLine("EDGE_VM_SELECTION policy=" + policy + " plans=" + edgePlans
+                + " retained=" + retainedEdgePlans + " reselected=" + reselectedEdgePlans
+                + " no_eligible_at_assignment=" + noEligibleAtAssignment
+                + " distinct_vms_selected=" + edgeVmSelections.size()
+                + " selectable_vms=" + availableEdgeVms.size());
+        if (folder == null || folder.isEmpty()) return;
+        File file = new File(folder, "EDGE_VM_SELECTION_" + policy + "_"
+                + numOfMobileDevice + "DEVICES.csv");
+        try (PrintWriter out = new PrintWriter(file, "UTF-8")) {
+            out.println("policy,num_devices,simulation_seed,vm_id,host_id,vm_index_on_host,assignment_selections");
+            for (EdgeVM vm : availableEdgeVms) {
+                out.println(policy + "," + numOfMobileDevice + ","
+                        + System.getProperty("scope.simSeed", "unknown") + "," + vm.getId()
+                        + "," + edgeVmMetadata.get(vm.getId())
+                        + "," + edgeVmSelections.getOrDefault(vm.getId(), 0L));
+            }
+        } catch (IOException e) {
+            throw new IllegalStateException("Cannot write edge VM audit: " + file, e);
+        }
+    }
 
     private static class OptimizerStateSnapshot {
 
@@ -318,9 +374,11 @@ public class VehicularEdgeOrchestrator extends EdgeOrchestrator {
         if (policy.equals("RAIDER_TRAX") || usesRtOptLogic()) {
             // ===== SCOPE DATA COLLECTION CHANGE END =====
             // 1. Try Edge
-            EdgeVM bestEdgeVm = findBestEdgeServer(task, true);
+            EdgeVM bestEdgeVm = selectEdgeVm(task, null);
 
             if (bestEdgeVm != null) {
+                plannedEdgeVms.put(edgeTaskKey(task), bestEdgeVm);
+                edgePlans++;
                 result = EDGE_DATACENTER;
             } else {
                 // 2. Fallback
@@ -339,6 +397,7 @@ public class VehicularEdgeOrchestrator extends EdgeOrchestrator {
             if (!policy.equals("RAIDER_TRAX")) {
                 String key = task.getMobileDeviceId() + "_" + task.getCloudletId();
                 taskDecisionMap.put(key, result);
+                if (policy.equals(EXP3_MC_POLICY)) exp3Feedback.admit(key, type);
                 if (result == EDGE_DATACENTER) {
                     sentEdge++;
                 } else if (result == CLOUD_DATACENTER_VIA_RSU) {
@@ -632,13 +691,15 @@ public class VehicularEdgeOrchestrator extends EdgeOrchestrator {
 
         
         if ((policy.equals("RAIDER_TRAX") || usesRtOptLogic()) && deviceId == EDGE_DATACENTER) {
-            selectedVM = findBestEdgeServer(task, false);
-            if (selectedVM == null) {
-                try {
-                    selectedVM = (EdgeVM) SimManager.getInstance().getEdgeServerManager().getDatacenterList().get(0).getHostList().get(0).getVmList().get(0);
-                } catch (Exception e) {
-                }
+            EdgeVM planned = plannedEdgeVms.remove(edgeTaskKey(task));
+            EdgeVM chosen = selectEdgeVm(task, planned);
+            if (chosen == null) noEligibleAtAssignment++;
+            else {
+                if (chosen == planned) retainedEdgePlans++;
+                else reselectedEdgePlans++;
+                edgeVmSelections.merge(chosen.getId(), 1L, Long::sum);
             }
+            selectedVM = chosen;
             return selectedVM;
         }
         
@@ -698,6 +759,11 @@ public class VehicularEdgeOrchestrator extends EdgeOrchestrator {
 
     @Override
     public void shutdownEntity() {
+        writeEdgeVmSelectionAudit();
+        if (policy.equals(EXP3_MC_POLICY)) {
+            SimLogger.printLine("EXP3_FEEDBACK_END pending_tasks=" + exp3Feedback.pendingTasks()
+                    + " ready_unconsumed_cohorts=" + exp3Feedback.readyIds().size());
+        }
         if (isTrainingDataActive()) {
             closeActiveTrainingWindow(CloudSim.clock());
             flushTrainingWindows(true);
@@ -748,6 +814,7 @@ public class VehicularEdgeOrchestrator extends EdgeOrchestrator {
      * delays
      */
     public void taskCompleted(Task task, double serviceTime) {
+        plannedEdgeVms.remove(edgeTaskKey(task));
         if (policy.equals("AI_TRAINER")) {
             trainerLogger.addSuccessStat(task, serviceTime);
         }
@@ -770,6 +837,7 @@ public class VehicularEdgeOrchestrator extends EdgeOrchestrator {
             }
 
             recordTrainingOutcome(task, true, serviceTime);
+            if (policy.equals(EXP3_MC_POLICY)) exp3Feedback.finish(task.getMobileDeviceId() + "_" + task.getCloudletId(), type, true, serviceTime);
             taskDecisionMap.remove(task.getMobileDeviceId() + "_" + task.getCloudletId());
         }
     }
@@ -780,6 +848,7 @@ public class VehicularEdgeOrchestrator extends EdgeOrchestrator {
      * @param task Failed task
      */
     public void taskFailed(Task task) {
+        plannedEdgeVms.remove(edgeTaskKey(task));
         if (policy.equals("AI_TRAINER")) {
             trainerLogger.addFailStat(task);
         }
@@ -799,6 +868,7 @@ public class VehicularEdgeOrchestrator extends EdgeOrchestrator {
             }
 
             recordTrainingOutcome(task, false, 0.0);
+            if (policy.equals(EXP3_MC_POLICY)) exp3Feedback.finish(task.getMobileDeviceId() + "_" + task.getCloudletId(), type, false, 0.0);
 
             String key = task.getMobileDeviceId() + "_" + task.getCloudletId();
             if (taskDecisionMap.containsKey(key)) {
@@ -832,68 +902,31 @@ public class VehicularEdgeOrchestrator extends EdgeOrchestrator {
     /**
      * RAIDER TRAX CORE LOGIC
      *
-     * @param checkThreshold If true, returns null if server is congested.
+     * Retain an eligible planned VM or select across all edge hosts and VMs.
      */
-    private EdgeVM findBestEdgeServer(Task task, boolean checkThreshold) {
-        double bestScore = Double.MAX_VALUE;
-        EdgeVM bestVm = null;
-        Location deviceLoc = SimManager.getInstance().getMobilityModel().getLocation(task.getMobileDeviceId(), CloudSim.clock());
+    // EdgeCloudSim's application demands and scheduler totals are already 0-100.
+    static double edgeVmLoadPercent(EdgeVM vm, double time) {
+        return vm.getCloudletScheduler().getTotalUtilizationOfCpu(time);
+    }
 
-        // SELECT PARAMETERS BASED ON TASK TYPE
+    private EdgeVM selectEdgeVm(Task task, EdgeVM planned) {
+        // VM allocation events run after startEntity; inspect hosts at first task.
+        if (!edgeInventoryReady) initializeEdgeVmInventory();
         int type = task.getTaskType();
-        // Fallback for unknown types to index 0
-        if (type < 0 || type >= NUM_APP_TYPES) {
-            type = 0;
-        }
-
-        double wLoad, wDist, threshold;
-
-        if (usesRtOptLogic()) {
-            wLoad = wLoadPerType[type];
-            wDist = wDistPerType[type];
-            threshold = thresholdPerType[type];
-        } else {
-            // Standard RAIDER_TRAX Defaults (Global)
-            wLoad = 0.5;
-            wDist = 0.5;
-            threshold = 85.0;
-        }
-
-        List<Datacenter> datacenters = SimManager.getInstance().getEdgeServerManager().getDatacenterList();
-        for (Datacenter datacenter : datacenters) {
-            if (datacenter.getHostList().isEmpty()) {
-                continue;
-            }
-            EdgeHost host = (EdgeHost) datacenter.getHostList().get(0);
-            Location serverLoc = host.getLocation();
-            double distance = SimUtils.calculateDistance(deviceLoc, serverLoc);
-
-            if (host.getVmList().isEmpty()) {
-                continue;
-            }
-            EdgeVM vm = (EdgeVM) host.getVmList().get(0);
-            double currentLoad = vm.getCloudletScheduler().getTotalUtilizationOfCpu(CloudSim.clock()) * 100;
-
-            double normDist = distance / 1000.0;
-            double normLoad = currentLoad / 100.0;
-            double noise = simulationRandom.nextDouble() * 0.1;
-            double score = (wDist * normDist) + (wLoad * normLoad) + noise;
-
-            if (checkThreshold) {
-                if (currentLoad < threshold) {
-                    if (score < bestScore) {
-                        bestScore = score;
-                        bestVm = vm;
-                    }
-                }
-            } else {
-                if (score < bestScore) {
-                    bestScore = score;
-                    bestVm = vm;
-                }
-            }
-        }
-        return bestVm;
+        if (type < 0 || type >= NUM_APP_TYPES) type = 0;
+        double wLoad = usesRtOptLogic() ? wLoadPerType[type] : 0.5;
+        double wDist = usesRtOptLogic() ? wDistPerType[type] : 0.5;
+        double threshold = usesRtOptLogic() ? thresholdPerType[type] : 85.0;
+        Location deviceLoc = SimManager.getInstance().getMobilityModel()
+                .getLocation(task.getMobileDeviceId(), CloudSim.clock());
+        return EdgeVmSelector.select(availableEdgeVms, planned,
+                // EdgeCloudSim task models and capacity checks use percentages (0-100).
+                vm -> edgeVmLoadPercent(vm, CloudSim.clock()),
+                vm -> SimUtils.calculateDistance(deviceLoc, ((EdgeHost) vm.getHost()).getLocation()),
+                wLoad, wDist, threshold,
+                ((VehicularCpuUtilizationModel) task.getUtilizationModelCpu())
+                        .predictUtilization(SimSettings.VM_TYPES.EDGE_VM),
+                simulationRandom);
     }
 
     // Helper for distance calculation if not available in SimUtils for this version
@@ -1382,6 +1415,8 @@ public class VehicularEdgeOrchestrator extends EdgeOrchestrator {
         flushTrainingWindows(false);
 
         final OptimizerStateSnapshot inputState = captureOptimizerState(timestamp);
+        final long exp3Window = policy.equals(EXP3_MC_POLICY) ? exp3Feedback.closeWindow() : -1;
+        final java.util.List<Long> exp3Ready = exp3Feedback.readyIds();
         // logPerformanceWindow(inputState);
 
         try {
@@ -1409,6 +1444,14 @@ public class VehicularEdgeOrchestrator extends EdgeOrchestrator {
 
                 StringBuilder json = new StringBuilder();
                 json.append("{");
+                if (policy.equals(EXP3_MC_POLICY)) {
+                    json.append("\"feedback_protocol\":\"admission_cohort_v1\",");
+                    json.append("\"closed_window_id\":").append(exp3Window).append(",");
+                    json.append("\"pending_feedback_tasks\":").append(exp3Feedback.pendingTasks()).append(",");
+                    double[] deadlines = new double[NUM_APP_TYPES];
+                    for (int i=0;i<NUM_APP_TYPES;i++) deadlines[i]=getDeadlineForType(i);
+                    json.append("\"feedback\":").append(exp3Feedback.feedbackJson(exp3Ready,deadlines)).append(",");
+                }
                 json.append("\"timestamp\":").append(timestamp).append(",");
                 json.append("\"num_devices\":").append(numOfMobileDevice).append(",");
 
@@ -1510,6 +1553,7 @@ public class VehicularEdgeOrchestrator extends EdgeOrchestrator {
                     }
                 }
 
+                if (policy.equals(EXP3_MC_POLICY)) exp3Feedback.acknowledge(exp3Ready);
                 CandidateConfiguration afterUpdate = captureCurrentConfiguration();
                 double stepChurn = configurationDistance(beforeUpdate, afterUpdate);
                 totalChurnAccumulated += stepChurn;

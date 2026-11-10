@@ -15,7 +15,10 @@ Adaptation to SCOPE:
   matching the five-candidate decision size evaluated in the paper;
 * observed reward is one minus SCOPE's normalized performance cost, without
   a churn penalty and without a hard R_max constraint;
-* the paper's eta=0.1 is retained by default.
+* eta defaults to 0.1 * min(1, 5/K); EXP3_MC_ETA overrides it;
+* completed admission cohorts supply delayed, correctly attributed feedback;
+* deterministic retention uses probability one. This reactive adaptation
+  does not claim standard EXP3 unbiased-vector or regret guarantees.
 
 Run with:
 
@@ -30,13 +33,16 @@ or set EXP3_MC_CANDIDATE_DATASET to its absolute path.
 
 from __future__ import annotations
 
+import copy
 import csv
+import hashlib
+from datetime import datetime, timezone
 import logging
 import math
 import os
 import re
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -67,8 +73,12 @@ RESULTS_DIR = Path(
 QOS_THRESHOLD = float(os.getenv("EXP3_MC_QOS_THRESHOLD", "0.20"))
 W_FAILURE = float(os.getenv("EXP3_MC_W_FAILURE", "0.50"))
 W_SERVICE = float(os.getenv("EXP3_MC_W_SERVICE", "0.50"))
-ETA = float(os.getenv("EXP3_MC_ETA", "0.10"))
-ARM_COUNT = int(os.getenv("EXP3_MC_ARM_COUNT", "5"))
+# Preserve the five-arm effective first-update scale as K grows. This is a
+# starting rule for sensitivity experiments, not a claim of optimal tuning.
+ETA_OVERRIDE = os.getenv("EXP3_MC_ETA")
+ETA = float(ETA_OVERRIDE) if ETA_OVERRIDE is not None else 0.10
+EXPERIMENT_ID = os.getenv("EXP3_MC_EXPERIMENT_ID", datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ"))
+ARM_COUNT = int(os.getenv("EXP3_MC_ARM_COUNT", "5"))  # 0 = full catalogue
 ARM_SELECTION_SEED = int(os.getenv("EXP3_MC_ARM_SELECTION_SEED", "20260828"))
 SEED_OFFSET = int(os.getenv("EXP3_MC_SEED_OFFSET", "300007"))
 PORT = int(os.getenv("EXP3_MC_PORT", "5003"))
@@ -117,8 +127,8 @@ def _validate_configuration() -> None:
         )
     if ETA <= 0.0:
         raise ValueError("EXP3_MC_ETA must be positive")
-    if ARM_COUNT < 2:
-        raise ValueError("EXP3_MC_ARM_COUNT must be at least 2")
+    if ARM_COUNT != 0 and ARM_COUNT < 2:
+        raise ValueError("EXP3_MC_ARM_COUNT must be 0 (full catalogue) or at least 2")
 
 
 def _load_candidate_catalogue() -> pd.DataFrame:
@@ -174,6 +184,9 @@ class Exp3McState:
     windows: int = 0
     reconfigurations: int = 0
     total_churn: float = 0.0
+    pending: dict = field(default_factory=dict)  # cohort -> (arm, actual draw probability)
+    processed: set = field(default_factory=set)
+    last_trigger_window: int = -1
 
 
 STATES: dict[str, Exp3McState] = {}
@@ -229,17 +242,15 @@ def _candidate_batch(current: dict[str, float]) -> pd.DataFrame:
     # are sampled once from the common feasible SCOPE catalogue with a fixed,
     # policy-independent seed. Keeping this subset fixed across iterations
     # prevents the arm set itself from becoming an experimental confound.
-    if len(all_candidates) <= ARM_COUNT:
+    if ARM_COUNT == 0 or len(all_candidates) <= ARM_COUNT:
         return all_candidates
 
     selection_rng = np.random.default_rng(ARM_SELECTION_SEED)
-    selected_tail = np.sort(
-        selection_rng.choice(
-            np.arange(1, len(all_candidates)),
-            size=ARM_COUNT - 1,
-            replace=False,
-        )
-    )
+    # Preserve the original five-arm subset, then extend it reproducibly.
+    tail = np.arange(1, len(all_candidates))
+    first = selection_rng.choice(tail, size=min(4, len(tail)), replace=False)
+    rest = selection_rng.permutation(np.setdiff1d(tail, first))
+    selected_tail = np.sort(np.concatenate([first, rest])[:ARM_COUNT - 1])
     selected_indices = np.concatenate(([0], selected_tail))
     return all_candidates.iloc[selected_indices].reset_index(drop=True)
     # ===== EXP3-MC ADAPTED CHANGE END: FIVE REPRODUCIBLE ARMS =====
@@ -366,7 +377,7 @@ def _new_state(data: dict[str, Any], current: dict[str, float]) -> Exp3McState:
         logits=np.zeros(arm_count, dtype=float),
         current_index=current_index,
         rng=rng,
-        eta=ETA,
+        eta=ETA if ETA_OVERRIDE is not None else 0.1 * min(1.0, 5.0 / arm_count),
     )
 
 
@@ -384,11 +395,13 @@ def _response_string(candidate: pd.Series) -> str:
 def _decision_log_path(row: dict[str, Any]) -> Path:
     if DECISION_LOG_OVERRIDE:
         return Path(DECISION_LOG_OVERRIDE)
+    safe_experiment = re.sub(r"[^A-Za-z0-9_.-]+", "_", EXPERIMENT_ID)
     safe_run_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(row["run_id"]))
     qos_label = f"{QOS_THRESHOLD:.2f}".replace(".", "")
     eta_label = f"{ETA:.2f}".replace(".", "")
     return RESULTS_DIR / (
-        f"exp3_mc_qos{qos_label}_eta{eta_label}_{safe_run_id}_"
+        f"exp3_cohort_{safe_experiment}_k{row['arm_count']}_subset{ARM_SELECTION_SEED}_"
+        f"eta{row['eta']:.10g}_qos{qos_label}_{safe_run_id}_"
         f"seed{row['simulation_seed']}_n{row['num_devices']}.csv"
     )
 
@@ -411,10 +424,14 @@ def _write_decision_log(row: dict[str, Any]) -> None:
 def _decision(data: dict[str, Any]) -> tuple[pd.Series, dict[str, Any]]:
     timestamp = float(data.get("timestamp", 0.0))
     current = _current_candidate(data)
-    performance_cost, weighted_failure, weighted_dnst, app_weights = (
-        _parse_observed_performance(data)
-    )
-    reward = float(np.clip(1.0 - performance_cost, 0.0, 1.0))
+    if data.get("feedback_protocol") != "admission_cohort_v1":
+        raise ValueError("Updated Java orchestrator required: missing admission_cohort_v1")
+    closed_window = int(data["closed_window_id"])
+    feedback = data.get("feedback", [])
+    if not isinstance(feedback, list):
+        raise ValueError("feedback must be a list")
+    performance_cost = weighted_failure = weighted_dnst = reward = None
+    app_weights = np.zeros(APP_COUNT)
     key = _run_key(data)
 
     with state_lock:
@@ -423,9 +440,9 @@ def _decision(data: dict[str, Any]) -> tuple[pd.Series, dict[str, Any]]:
         # the same run key, so stale bandit state must not leak across runs.
         if state is None or timestamp <= state.last_timestamp:
             state = _new_state(data, current)
-            STATES[key] = state
             reset = True
         else:
+            state = copy.deepcopy(state)  # Commit only after complete validation.
             reset = False
             observed_index = _find_candidate_index(state.candidates, current)
             if observed_index != state.current_index:
@@ -437,26 +454,74 @@ def _decision(data: dict[str, Any]) -> tuple[pd.Series, dict[str, Any]]:
                 )
                 state.current_index = observed_index
 
-        probabilities_before = _softmax(state.logits)
-        active_probability = max(
-            float(probabilities_before[state.current_index]), 1e-12
-        )
+        # The first interval uses the deterministic simulator initialization.
+        if reset and closed_window == 0:
+            state.pending[0] = (state.current_index, 1.0)
+        # A failed delivery may mean the simulator did not apply our proposal.
+        # Do not attribute that interval to an unconfirmed selection.
+        expected = state.pending.get(closed_window)
+        if expected is not None and expected[0] != state.current_index:
+            del state.pending[closed_window]
 
-        # Paper equations (3)-(4): importance-weighted bandit feedback updates
-        # only the active arm, since no counterfactual rewards are available.
-        estimated_reward = reward / active_probability
-        state.logits[state.current_index] += state.eta * estimated_reward
-        state.logits -= np.max(state.logits)
+        updates = []
+        empty_windows = unknown_windows = duplicate_windows = 0
+        trigger_window = -1
+        trigger_cost = None
+        for item in sorted(feedback, key=lambda item: int(item["window_id"])):
+            window = int(item["window_id"])
+            if window > closed_window:
+                raise ValueError("Feedback cannot come from a future window")
+            if window in state.processed:
+                duplicate_windows += 1
+                continue
+            stats = item["app_stats"]
+            counts = []
+            for app_id in range(APP_COUNT):
+                a = stats[str(app_id)]
+                n = _required(a, "total", "feedback")
+                completed = _required(a, "completed", "feedback")
+                failed = _required(a, "failures", "feedback")
+                if min(n, completed, failed) < 0 or n != completed + failed:
+                    raise ValueError("Only complete admission cohorts may be learned")
+                if any(v != int(v) for v in (n, completed, failed)):
+                    raise ValueError("Outcome counts must be integers")
+                counts.append(n)
+            selection = state.pending.pop(window, None)
+            state.processed.add(window)
+            if selection is None:
+                unknown_windows += 1
+                continue
+            if sum(counts) == 0:
+                empty_windows += 1
+                continue
+            cost, failure, dnst, weights = _parse_observed_performance({"app_stats": stats})
+            observed_reward = float(np.clip(1.0 - cost, 0.0, 1.0))
+            arm, probability = selection
+            increment = state.eta * observed_reward / probability
+            if not math.isfinite(increment):
+                raise ValueError("Nonfinite score update; reduce learning rate")
+            state.logits[arm] += increment
+            state.logits -= np.max(state.logits)
+            updates.append({"window_id": window, "arm": arm, "probability": probability,
+                            "reward": observed_reward, "score_increment": increment})
+            performance_cost, weighted_failure, weighted_dnst = cost, failure, dnst
+            reward, app_weights = observed_reward, weights
+            # Delayed feedback teaches its original arm. Only feedback for the
+            # active arm may trigger selection, and never an older trigger twice.
+            if arm == state.current_index and window > state.last_trigger_window:
+                trigger_window, trigger_cost = window, cost
+        if trigger_window >= 0:
+            state.last_trigger_window = trigger_window
         probabilities_after = _softmax(state.logits)
-
-        triggered = performance_cost > QOS_THRESHOLD
+        triggered = trigger_cost is not None and trigger_cost > QOS_THRESHOLD
         previous_index = state.current_index
         if triggered:
-            selected_index = int(
-                state.rng.choice(len(state.candidates), p=probabilities_after)
-            )
+            selected_index = int(state.rng.choice(len(state.candidates), p=probabilities_after))
+            selection_probability = float(probabilities_after[selected_index])
         else:
             selected_index = previous_index
+            selection_probability = 1.0
+        state.pending[closed_window + 1] = (selected_index, selection_probability)
 
         switched = selected_index != previous_index
         selected = state.candidates.iloc[selected_index]
@@ -470,6 +535,20 @@ def _decision(data: dict[str, Any]) -> tuple[pd.Series, dict[str, Any]]:
 
         row: dict[str, Any] = {
             "run_key": key,
+            "experiment_id": EXPERIMENT_ID,
+            "arm_selection_seed": ARM_SELECTION_SEED,
+            "catalogue_hash": hashlib.sha256(state.candidates.to_csv(index=False).encode()).hexdigest(),
+            "feedback_protocol": "admission_cohort_v1",
+            "closed_window_id": closed_window,
+            "learning_updates": len(updates),
+            "feedback_updates": __import__("json").dumps(updates),
+            "empty_feedback_windows": empty_windows,
+            "unknown_feedback_windows": unknown_windows,
+            "duplicate_feedback_windows": duplicate_windows,
+            "pending_feedback_tasks": data.get("pending_feedback_tasks", 0),
+            "selection_probability": selection_probability,
+            "trigger_feedback_window": trigger_window,
+            "max_arm_probability": float(probabilities_after.max()),
             "run_id": str(data.get("run_id", "run_unspecified")),
             "simulation_seed": int(
                 float(data.get("simulation_seed", 20260828))
@@ -500,6 +579,7 @@ def _decision(data: dict[str, Any]) -> tuple[pd.Series, dict[str, Any]]:
             row[f"selected_{column.removeprefix('candidate_')}"] = selected[
                 column
             ]
+        STATES[key] = state
         return selected, row
 
 
@@ -513,7 +593,8 @@ def health():
             "arm_count": ARM_COUNT,
             "arm_selection_seed": ARM_SELECTION_SEED,
             "qos_threshold": QOS_THRESHOLD,
-            "eta": ETA,
+            "eta_override": ETA_OVERRIDE,
+            "eta_rule": "0.1 * min(1, 5 / actual_arm_count)" if ETA_OVERRIDE is None else "explicit",
             "state_count": len(STATES),
         }
     )
@@ -535,7 +616,7 @@ def optimize():
         selected, row = _decision(data)
         _write_decision_log(row)
         logger.info(
-            "run=%s time=%.1f cost=%.4f reward=%.4f trigger=%s "
+            "run=%s time=%.1f cost=%s reward=%s trigger=%s "
             "arm=%d->%d switched=%s reconfigurations=%d",
             row["run_key"],
             row["timestamp"],

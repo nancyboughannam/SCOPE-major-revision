@@ -1,0 +1,206 @@
+--- previous_EXP3_revision/VehicularEdgeOrchestrator.java
++++ edge_vm_fix/VehicularEdgeOrchestrator.java
+@@ -124,6 +124,60 @@
+ 
+     private Random simulationRandom;
+ 
++    // Selected at routing, revalidated after WLAN upload. No VM reservation.
++    private final Map<String, EdgeVM> plannedEdgeVms = new java.util.HashMap<>();
++    private final List<EdgeVM> availableEdgeVms = new java.util.ArrayList<>();
++    private final Map<Integer, Long> edgeVmSelections = new java.util.HashMap<>();
++    private boolean edgeInventoryReady = false;
++    private final Map<Integer, String> edgeVmMetadata = new java.util.HashMap<>();
++    private long edgePlans, retainedEdgePlans, reselectedEdgePlans, noEligibleAtAssignment;
++
++    private String edgeTaskKey(Task task) {
++        return task.getMobileDeviceId() + "_" + task.getCloudletId();
++    }
++
++    private void initializeEdgeVmInventory() {
++        plannedEdgeVms.clear(); availableEdgeVms.clear(); edgeVmSelections.clear();
++        edgePlans = retainedEdgePlans = reselectedEdgePlans = noEligibleAtAssignment = 0;
++        for (Datacenter dc : SimManager.getInstance().getEdgeServerManager().getDatacenterList()) {
++            for (org.cloudbus.cloudsim.Host host : dc.getHostList()) {
++                for (Vm vm : host.getVmList()) {
++                    if (vm instanceof EdgeVM) {
++                        availableEdgeVms.add((EdgeVM) vm);
++                        edgeVmMetadata.put(vm.getId(), host.getId() + "," + host.getVmList().indexOf(vm));
++                    }
++                }
++            }
++        }
++        edgeInventoryReady = true;
++        SimLogger.printLine("EDGE_VM_INVENTORY policy=" + policy
++                + " selectable_vms=" + availableEdgeVms.size());
++    }
++
++    private void writeEdgeVmSelectionAudit() {
++        if (!(policy.equals("RAIDER_TRAX") || usesRtOptLogic())) return;
++        String folder = SimLogger.getInstance().getOutputFolder();
++        SimLogger.printLine("EDGE_VM_SELECTION policy=" + policy + " plans=" + edgePlans
++                + " retained=" + retainedEdgePlans + " reselected=" + reselectedEdgePlans
++                + " no_eligible_at_assignment=" + noEligibleAtAssignment
++                + " distinct_vms_selected=" + edgeVmSelections.size()
++                + " selectable_vms=" + availableEdgeVms.size());
++        if (folder == null || folder.isEmpty()) return;
++        File file = new File(folder, "EDGE_VM_SELECTION_" + policy + "_"
++                + numOfMobileDevice + "DEVICES.csv");
++        try (PrintWriter out = new PrintWriter(file, "UTF-8")) {
++            out.println("policy,num_devices,simulation_seed,vm_id,host_id,vm_index_on_host,assignment_selections");
++            for (EdgeVM vm : availableEdgeVms) {
++                out.println(policy + "," + numOfMobileDevice + ","
++                        + System.getProperty("scope.simSeed", "unknown") + "," + vm.getId()
++                        + "," + edgeVmMetadata.get(vm.getId())
++                        + "," + edgeVmSelections.getOrDefault(vm.getId(), 0L));
++            }
++        } catch (IOException e) {
++            throw new IllegalStateException("Cannot write edge VM audit: " + file, e);
++        }
++    }
++
+     private static class OptimizerStateSnapshot {
+ 
+         double timestamp;
+@@ -320,9 +374,11 @@
+         if (policy.equals("RAIDER_TRAX") || usesRtOptLogic()) {
+             // ===== SCOPE DATA COLLECTION CHANGE END =====
+             // 1. Try Edge
+-            EdgeVM bestEdgeVm = findBestEdgeServer(task, true);
++            EdgeVM bestEdgeVm = selectEdgeVm(task, null);
+ 
+             if (bestEdgeVm != null) {
++                plannedEdgeVms.put(edgeTaskKey(task), bestEdgeVm);
++                edgePlans++;
+                 result = EDGE_DATACENTER;
+             } else {
+                 // 2. Fallback
+@@ -635,13 +691,15 @@
+ 
+         
+         if ((policy.equals("RAIDER_TRAX") || usesRtOptLogic()) && deviceId == EDGE_DATACENTER) {
+-            selectedVM = findBestEdgeServer(task, false);
+-            if (selectedVM == null) {
+-                try {
+-                    selectedVM = (EdgeVM) SimManager.getInstance().getEdgeServerManager().getDatacenterList().get(0).getHostList().get(0).getVmList().get(0);
+-                } catch (Exception e) {
+-                }
+-            }
++            EdgeVM planned = plannedEdgeVms.remove(edgeTaskKey(task));
++            EdgeVM chosen = selectEdgeVm(task, planned);
++            if (chosen == null) noEligibleAtAssignment++;
++            else {
++                if (chosen == planned) retainedEdgePlans++;
++                else reselectedEdgePlans++;
++                edgeVmSelections.merge(chosen.getId(), 1L, Long::sum);
++            }
++            selectedVM = chosen;
+             return selectedVM;
+         }
+         
+@@ -701,6 +759,7 @@
+ 
+     @Override
+     public void shutdownEntity() {
++        writeEdgeVmSelectionAudit();
+         if (policy.equals(EXP3_MC_POLICY)) {
+             SimLogger.printLine("EXP3_FEEDBACK_END pending_tasks=" + exp3Feedback.pendingTasks()
+                     + " ready_unconsumed_cohorts=" + exp3Feedback.readyIds().size());
+@@ -755,6 +814,7 @@
+      * delays
+      */
+     public void taskCompleted(Task task, double serviceTime) {
++        plannedEdgeVms.remove(edgeTaskKey(task));
+         if (policy.equals("AI_TRAINER")) {
+             trainerLogger.addSuccessStat(task, serviceTime);
+         }
+@@ -788,6 +848,7 @@
+      * @param task Failed task
+      */
+     public void taskFailed(Task task) {
++        plannedEdgeVms.remove(edgeTaskKey(task));
+         if (policy.equals("AI_TRAINER")) {
+             trainerLogger.addFailStat(task);
+         }
+@@ -841,68 +902,22 @@
+     /**
+      * RAIDER TRAX CORE LOGIC
+      *
+-     * @param checkThreshold If true, returns null if server is congested.
++     * Retain an eligible planned VM or select across all edge hosts and VMs.
+      */
+-    private EdgeVM findBestEdgeServer(Task task, boolean checkThreshold) {
+-        double bestScore = Double.MAX_VALUE;
+-        EdgeVM bestVm = null;
+-        Location deviceLoc = SimManager.getInstance().getMobilityModel().getLocation(task.getMobileDeviceId(), CloudSim.clock());
+-
+-        // SELECT PARAMETERS BASED ON TASK TYPE
++    private EdgeVM selectEdgeVm(Task task, EdgeVM planned) {
++        // VM allocation events run after startEntity; inspect hosts at first task.
++        if (!edgeInventoryReady) initializeEdgeVmInventory();
+         int type = task.getTaskType();
+-        // Fallback for unknown types to index 0
+-        if (type < 0 || type >= NUM_APP_TYPES) {
+-            type = 0;
+-        }
+-
+-        double wLoad, wDist, threshold;
+-
+-        if (usesRtOptLogic()) {
+-            wLoad = wLoadPerType[type];
+-            wDist = wDistPerType[type];
+-            threshold = thresholdPerType[type];
+-        } else {
+-            // Standard RAIDER_TRAX Defaults (Global)
+-            wLoad = 0.5;
+-            wDist = 0.5;
+-            threshold = 85.0;
+-        }
+-
+-        List<Datacenter> datacenters = SimManager.getInstance().getEdgeServerManager().getDatacenterList();
+-        for (Datacenter datacenter : datacenters) {
+-            if (datacenter.getHostList().isEmpty()) {
+-                continue;
+-            }
+-            EdgeHost host = (EdgeHost) datacenter.getHostList().get(0);
+-            Location serverLoc = host.getLocation();
+-            double distance = SimUtils.calculateDistance(deviceLoc, serverLoc);
+-
+-            if (host.getVmList().isEmpty()) {
+-                continue;
+-            }
+-            EdgeVM vm = (EdgeVM) host.getVmList().get(0);
+-            double currentLoad = vm.getCloudletScheduler().getTotalUtilizationOfCpu(CloudSim.clock()) * 100;
+-
+-            double normDist = distance / 1000.0;
+-            double normLoad = currentLoad / 100.0;
+-            double noise = simulationRandom.nextDouble() * 0.1;
+-            double score = (wDist * normDist) + (wLoad * normLoad) + noise;
+-
+-            if (checkThreshold) {
+-                if (currentLoad < threshold) {
+-                    if (score < bestScore) {
+-                        bestScore = score;
+-                        bestVm = vm;
+-                    }
+-                }
+-            } else {
+-                if (score < bestScore) {
+-                    bestScore = score;
+-                    bestVm = vm;
+-                }
+-            }
+-        }
+-        return bestVm;
++        if (type < 0 || type >= NUM_APP_TYPES) type = 0;
++        double wLoad = usesRtOptLogic() ? wLoadPerType[type] : 0.5;
++        double wDist = usesRtOptLogic() ? wDistPerType[type] : 0.5;
++        double threshold = usesRtOptLogic() ? thresholdPerType[type] : 85.0;
++        Location deviceLoc = SimManager.getInstance().getMobilityModel()
++                .getLocation(task.getMobileDeviceId(), CloudSim.clock());
++        return EdgeVmSelector.select(availableEdgeVms, planned,
++                vm -> vm.getCloudletScheduler().getTotalUtilizationOfCpu(CloudSim.clock()) * 100.0,
++                vm -> SimUtils.calculateDistance(deviceLoc, ((EdgeHost) vm.getHost()).getLocation()),
++                wLoad, wDist, threshold, simulationRandom);
+     }
+ 
+     // Helper for distance calculation if not available in SimUtils for this version

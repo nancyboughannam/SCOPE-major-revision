@@ -1,274 +1,205 @@
-# SCOPE — Stability-Constrained Optimization for Predictable Edge
+# EXP3_MC feedback audit — diagnostic package v1
 
-Code and experiments for:
+## Install and verify first
 
-> N. Boughannam, A. Nasser, C. Zaki, A. Ramadan, S. Hamrioui, P. Lorenz,
-> **"Stability-Aware Multi-Timescale Orchestration for IoE Edge–Cloud Systems."**
+Copy the entire `exp3_feedback_audit` folder from the package's `FLaskAPIs`
+folder into:
 
-SCOPE is a multi-timescale orchestration framework for IoE edge-cloud
-systems. It combines fast, per-task rule-based steering at the edge
-(inherited from the authors' earlier RAIDER-TRAX framework) with a slower,
-cloud-side global planner that periodically re-scores a fixed catalogue of
-candidate configurations using machine-learned performance predictors, and
-only ever accepts a configuration change if its predicted reconfiguration
-cost stays under a hard budget. The goal is to get the benefit of global
-optimization without the instability ("configuration churn") that comes
-from re-optimizing greedily on every observation.
+`~/Documents/SCOPE-major-revision/FLaskAPIs/`
 
-**If you only want to verify the paper's numbers without running
-anything:** every table in the paper has a pre-computed result file already
-checked into this repository. Jump to
-["Where each table in the paper comes from"](#where-each-table-in-the-paper-comes-from) below —
-you can diff those files against the paper's tables directly.
+This adds three Python files. It does not replace `exp3_mc_service.py`,
+`ml_optimizer_service.py`, `run_shared.py`, Java files, or past results.
+If the destination already exists, stop and compare it instead of overwriting.
 
-## How this repository is organized
-
-The system has two halves that run as separate processes and talk to each
-other over a local HTTP API — they are never compiled or linked together.
-
-```
-SCOPE/
-├── ThreeBrains/     Java. A modified fork of EdgeCloudSim, the discrete-event
-│                    simulator. Runs the vehicular ITS scenario, moves
-│                    vehicles, generates tasks, and calls out to the Python
-│                    services below to decide where each task goes.
-│                    GPLv3-licensed (see NOTICE.md).
-│
-└── FLaskAPIs/       Python. Three small Flask services (the "global
-                     planner" from the paper's Fig. 2) plus the offline
-                     scripts used to build the XGBoost predictors and to
-                     turn raw simulation output into the paper's tables and
-                     figures. MIT-licensed.
-```
-
-### Terminology map: paper names ↔ code names
-
-**Read this before anything else.** The paper's method is called **SCOPE**
-throughout. Internally, the same thing is identified as **`RT_OPT_ML`** —
-an earlier working name from before the paper settled on "SCOPE" as the
-framework's name. The two refer to the same system; here's how every name
-in the paper matches its counterpart in the code:
-
-| What the paper calls it | What the code calls it | Where it lives |
-|---|---|---|
-| SCOPE (the full framework) | `RT_OPT_ML` (Java orchestrator policy name), served by `ml_optimizer_service.py` | `FLaskAPIs/ml_optimizer_service.py`, port 5002 |
-| RAIDER-TRAX (baseline) | `RAIDER_TRAX` | Heuristic logic lives directly in `VehicularEdgeOrchestrator.java`; SCOPE's fast/edge steering (Algorithm 2 in the paper) extends this same code path |
-| RT-OPT (baseline, non-predictive) | `RT_OPT` | `FLaskAPIs/Optimizer.py`, port 5001 |
-| RANDOM (baseline) | `RANDOM` | Handled directly in `VehicularEdgeOrchestrator.java`, no external service call |
-| EXP3-MC-adapted (baseline) | `EXP3_MC` | `FLaskAPIs/exp3_mc_service.py`, port 5003 |
-| SoftCost-OPT (ablation variant) | `SOFTCOST_OPT` | Same service as SCOPE (`ml_optimizer_service.py`), with the hard `R_max` constraint disabled and only the λ-weighted soft penalty active |
-| Performance-only (ablation variant) | `PERFORMANCE_ONLY` | Same service as SCOPE, with λ = 0 and the hard constraint disabled |
-| — (training-data generation, not in the paper's comparisons) | `SCOPE_DATA_COLLECTION` | Drives the exploration policy that produced the ~15,900-row raw candidate dataset used to train the XGBoost models |
-
-`FLaskAPIs/scope_statistics.py` confirms this mapping directly — its
-`--scope` argument defaults to the literal string `RT_OPT_ML`.
-
-## Setup
-
-### Prerequisites
-
-- **Java 21+** to build and run the simulator (`ThreeBrains/`)
-- **Python 3.10+** for the optimization services and analysis scripts
-- The Java dependencies (CloudSim, Weka, jFuzzyLogic, etc.) are already
-  vendored as `.jar` files under `ThreeBrains/lib/` — no separate download
-  needed
-
-### Python environment
+Stop the existing EXP3 service before launching another service on port 5003.
+From Terminal:
 
 ```bash
-cd FLaskAPIs
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+cd ~/Documents/SCOPE-major-revision/FLaskAPIs
+./.venv-revision/bin/python exp3_feedback_audit/test_audit.py
 ```
 
-`requirements.txt` pins `xgboost==3.1.2`, `pandas==2.3.3`, and
-`scikit-learn==1.8.0` — these three are confirmed to match what was
-actually used to train the checked-in models
-(`scope_candidate_xgboost_results/model_manifest.json` records the exact
-versions). The rest of the dependencies (`flask`, `ortools`, `scipy`,
-`matplotlib`, `numpy`) are listed with minimum versions inferred from the
-imports; they have not been individually version-locked against the
-original run, so if you hit a compatibility issue, that's the first place
-to look.
+Expected: 13 tests, OK. These use synthetic data in temporary folders; they do
+not run EdgeCloudSim or change any experiment output.
 
-### Compiling and running the simulator
+Verify the preserved full catalogue without starting a server:
 
 ```bash
-cd ThreeBrains/scripts/sample_app5
-./compile.sh          # builds into ThreeBrains/bin
+./.venv-revision/bin/python exp3_feedback_audit/run_audit.py --catalogue-experiment revision_results/shared_full_ablation01 --output revision_results/exp3_full_fixed_audit01 --mode fixed --check-only
 ```
 
-Which policies the simulator exercises is controlled by one line in
-`ThreeBrains/scripts/sample_app5/config/default_config.properties`:
+Expected: 2537 shared arms, original order, fixed, effective eta=0.1.
+If the source experiment is not found or its checksum/order differs, stop and
+share the error. Do not rebuild or silently substitute a different catalogue.
+
+## Why a separate implementation?
+
+The original script remains the historical reference. The new service corrects
+feedback bookkeeping and records the distinction explicitly:
+
+| Previous action was | Denominator for its observed feedback |
+|---|---|
+| Fixed initial configuration | 1 |
+| Randomly sampled arm | Probability used for that specific draw |
+| Deterministically retained arm after no trigger | 1 |
+| Randomly sampled arm happened to equal current arm | Its draw probability, NOT 1 |
+| Java reports an unexpected arm | Reject with an error; do not silently attribute feedback |
+
+The update remains score += effective_eta * reward / recorded_probability.
+An initial observation is credited once at weight 1 rather than multiplied by K.
+Retained-action windows provide no observations of other arms; do NOT claim
+full-vector unbiasedness or an adversarial regret guarantee for this reactive
+adaptation. This is a declared adapted algorithm, not a verified reproduction
+of the original authors' implementation.
+
+The normalization, reward, QoS trigger, candidate selection, response format,
+port 5003 and Java policy name EXP3_MC are unchanged. No exploration mixture is
+added. Fixed eta can still cause concentration after a genuinely random draw.
+The new fields expose that behavior instead of hiding it.
+
+## Two explicitly named modes
+
+1. `fixed`: effective_eta = eta_reference (default 0.1).
+2. `scaled_k5`: effective_eta = eta_reference * 5 / actual_number_of_arms.
+
+The scaling mode is a diagnostic sensitivity rule, not a formula taken from the
+paper and not a guaranteed optimal learning rate. It preserves the K=5 reference
+scale. For reference eta=0.1:
+
+| K | Fixed eta | Scaled eta |
+|---:|---:|---:|
+| 5 | 0.1 | 0.1 |
+| 25 | 0.1 | 0.02 |
+| 100 | 0.1 | 0.005 |
+| 2537 | 0.1 | approximately 0.000197083 |
+
+The runner explicitly sets eta and mode; the old shared launcher would override
+eta and load the old service, so do not use run_shared.py for these new modes.
+Each new output folder records the mode, reference/effective eta, source hashes,
+health information and a copy of the exact catalogue. Existing output folders
+are refused. `--check-only` creates no results.
+
+## Next two diagnostic simulations, after the tests pass
+
+Run ONLY EXP3_MC. Do not repeat SCOPE or its ablations.
+Make a COPY of ThreeBrains/scripts/sample_app5/config/shared_catalogue_pilot.properties
+named `exp3_feedback_audit.properties`, and set these existing properties:
 
 ```properties
-# Main scalability comparison (Fig. 4, Fig. 5, Table VI):
-orchestrator_policies= RANDOM,RAIDER_TRAX,RT_OPT_ML,EXP3_MC
-
-# Ablation study (Table VII) - comment out the line above and
-# uncomment this one instead:
-# orchestrator_policies=SCOPE_DATA_COLLECTION,SOFTCOST_OPT,PERFORMANCE_ONLY,RT_OPT
+simulation_time=60
+warm_up_period=3
+min_number_of_mobile_devices=1800
+max_number_of_mobile_devices=1800
+mobile_device_counter_size=100
+orchestrator_policies=EXP3_MC
 ```
 
-This switch is manual today — there's no flag or separate config file for
-it, you edit this line by hand depending on which experiment you're
-running. That's a rough edge worth fixing if this repo gets more outside
-users; flagging it here so it's not a surprise.
+Leave all other simulation settings unchanged. Both initial checks use iteration
+1 / seed 20260829 solely as diagnostics. They are NOT held-out final evaluation.
 
-Run a single iteration with:
+### Diagnostic A: corrected bookkeeping, fixed eta
 
 ```bash
-./runner.sh <output_dir> default_config edge_devices.xml applications.xml <iteration_number>
+cd ~/Documents/SCOPE-major-revision/FLaskAPIs
+./.venv-revision/bin/python exp3_feedback_audit/run_audit.py --catalogue-experiment revision_results/shared_full_ablation01 --output revision_results/exp3_full_fixed_audit01 --mode fixed
 ```
 
-or use `run_scenarios.sh <parallel_processes> <iterations>` to run several
-iterations in parallel (see the script for usage). Each run needs the
-relevant Flask service(s) already running and reachable at
-`127.0.0.1:5001`/`5002`/`5003` (below).
+Leave this terminal running. SCOPE's Python service is unnecessary for an
+EXP3-only run. In NetBeans use the usual main class
+`edu.boun.edgecloudsim.applications.sample_app5.VehicularMainApp`.
+Working directory: `/Users/nancyboughannam/Documents/SCOPE-major-revision`.
+Arguments (one line):
 
-### Starting the optimization services
+```text
+ThreeBrains/scripts/sample_app5/config/exp3_feedback_audit.properties ThreeBrains/scripts/sample_app5/config/edge_devices.xml ThreeBrains/scripts/sample_app5/config/applications.xml ThreeBrains/revision_results/exp3_full_fixed_audit01/ite1 1
+```
 
-Each service is a separate Flask process. Run whichever ones the active
-`orchestrator_policies` line needs:
+Wait for BUILD SUCCESSFUL, save/copy the Output text, then stop the Python service
+with Ctrl+C. Capture any optimizer error even if Java reports BUILD SUCCESSFUL;
+Java may continue after an HTTP error. Do not interpret that as a valid run.
+
+### Diagnostic B: corrected bookkeeping, scaled eta
 
 ```bash
-cd FLaskAPIs
-
-# RT-OPT baseline (also backs RAIDER_TRAX and RANDOM's calls) - port 5001
-python3 Optimizer.py
-
-# SCOPE / RT_OPT_ML, SoftCost-OPT, Performance-only - port 5002
-# (which variant runs is selected by the "policy" field in each request,
-# driven by the simulator's active orchestrator_policies line above)
-SCOPE_LAMBDA=0.20 SCOPE_R_MAX=0.15 SCOPE_W_FAILURE=0.50 SCOPE_W_SERVICE=0.50 \
-  python3 ml_optimizer_service.py
-
-# EXP3-MC-adapted baseline - port 5003
-python3 exp3_mc_service.py
+./.venv-revision/bin/python exp3_feedback_audit/run_audit.py --catalogue-experiment revision_results/shared_full_ablation01 --output revision_results/exp3_full_scaled_audit01 --mode scaled_k5
 ```
 
-`SCOPE_LAMBDA=0.20` and `SCOPE_R_MAX=0.15` are the paper's reported
-operating point (Section V-D). **The script's own built-in defaults if you
-omit these env vars are different (`LAMBDA=0.50`, `R_MAX=0.20`)** — those
-built-in defaults were left over from earlier sensitivity sweeps, not the
-paper's final settings. Always set them explicitly as shown above (or use
-`FLaskAPIs/catalogue_sensitivity/start_catalogue_service.sh` as a template —
-it sets these correctly).
+NetBeans arguments (same seed/configuration, different output directory):
 
-## Where each table in the paper comes from
+```text
+ThreeBrains/scripts/sample_app5/config/exp3_feedback_audit.properties ThreeBrains/scripts/sample_app5/config/edge_devices.xml ThreeBrains/scripts/sample_app5/config/applications.xml ThreeBrains/revision_results/exp3_full_scaled_audit01/ite1 1
+```
 
-Every one of these has already been run once, and the output is checked
-into this repository — you can inspect or diff the files below without
-running anything. The "regenerate" command shows how to reproduce it from
-scratch. For some of these, that additionally requires EdgeCloudSim's raw
-performance logs, which live in `ThreeBrains/sim_results/` (see the note at
-the end of this section for which parts of that folder are, and aren't,
-checked in).
+Save the Output text again. Upload Python and Java result folders for both modes.
+Do not choose a final learning rate from whichever wins this single diagnostic.
 
-| Paper artifact | Already-computed result in this repo | Script that produces it |
-|---|---|---|
-| Table IV (XGBoost prediction accuracy) | `FLaskAPIs/scope_candidate_xgboost_results/model_metrics.csv` and `model_manifest.json` | `python3 train_candidate_xgboost.py` (reads `scope_candidate_dataset/candidate_dataset_{train,validation,test}.csv`, built by `prepare_candidate_dataset.py`) |
-| Table V (λ sensitivity) | `FLaskAPIs/lambda_table_output/lambda_sensitivity_table.tex` and `lambda_sensitivity_summary.csv` | `python3 lambda_sensitivity_table.py --decision-input "Lambda testing_Flask.zip" --results-input "Lambda testing_Simresults.zip" --output-dir lambda_table_output --selected-lambda 0.20` (run from `FLaskAPIs/`; both inputs are checked in as zips, no extraction needed) |
-| Table VI (paired baseline comparison, Wilcoxon + bootstrap CIs) | `FLaskAPIs/scope_statistics_results/` (generated on run; not pre-populated in this repo — see note below) | `python3 scope_statistics.py --input <path to your sim_results>` |
-| Table VII (ablation: SCOPE vs. SoftCost-OPT vs. Performance-only vs. RT-OPT) | `FLaskAPIs/ablation_figures_final/table1_ablation.tex` | `python3 plot_ablation_results.py` — reads `ablation_results_final/decision_logs/` (checked in) plus raw simulator logs; extract `ThreeBrains/sim_results/Ablation test.zip` into `FLaskAPIs/ablation_results_final/sim_results/` first |
-| Table VIII (candidate-catalogue size sensitivity) | `FLaskAPIs/catalogue_runs/pilot_{full,half,quarter}_*` (raw decision logs; the paper's summary table itself is not pre-built in this repo) | `python3 catalogue_sensitivity/catalogue_results_table.py --sim-root ... --decision-root FLaskAPIs/catalogue_runs --output ...` |
-| Fig. 3 (Δ*T* sensitivity) | Not pre-built in this repo | Requires re-running the simulator at ΔT ∈ {15, 30, 60, 90}s. This isn't a config-file setting — ΔT is hardcoded as DELTA_T in ThreeBrains/src/edu/boun/edgecloudsim/applications/sample_app5/VehicularEdgeOrchestrator.java (line 71, currently 60.0). Edit that constant, re-run ./compile.sh, then run the simulator as above — once per ΔT value.|
-| Fig. 4 / Fig. 5 (scalability curves, service time, VM utilization) | `ThreeBrains/sim_results/full study - 10 iterations/ite1` … `ite10` (raw EdgeCloudSim logs for the full 100–1,800 vehicle sweep, all 4 main-comparison policies, 10 iterations) | The standard EdgeCloudSim MATLAB plotters in `ThreeBrains/scripts/sample_app5/matlab/` (`plotAvgFailedTask.m`, `plotAvgServiceTime.m`, `plotAvgVmUtilization.m`) read this log format directly. We have not confirmed these produce pixel-identical output to the paper's figures (they may have been adapted), but they're the standard tool for this data and a reasonable starting point. |
+## What to inspect in new logs
 
-**Important caveat on regenerating from scratch:** `plot_ablation_results.py`,
-`scope_statistics.py`, and `catalogue_results_table.py` all combine two
-things: the optimizer's own decision logs (checked into this repo, e.g.
-`ablation_results_final/decision_logs/`) and EdgeCloudSim's raw
-`*_GENERIC.log` performance output. That raw output lives under
-`ThreeBrains/sim_results/`:
+- First feedback_origin=initial_fixed and feedback_probability=1.
+- Later sampled feedback_probability equals the preceding row's
+  next_behavior_probability. For retained feedback it equals 1.
+- mode, eta_reference and eta identify the variant without relying on a folder name.
+- max_selection_probability, selection_entropy and effective_arm_count diagnose
+  concentration (effective_arm_count here is exp(entropy), not catalogue size).
+- Reward, score_increment, selected arm, triggering, switching and churn remain logged.
+- Compare realized Java failures/service time, not predictions alone.
+- Equal catalogue membership does not equalize information: SCOPE has pretrained
+  predictors whereas this baseline receives only observed-arm feedback.
+- 59 windows cannot explore 2537 arms comprehensively. Report that limitation.
 
-- **Main scalability comparison (Table VI, Fig. 4, Fig. 5):** the full raw
-  sweep — 10 iterations × all 4 main-comparison policies × 100–1,800
-  vehicles — is checked in under
-  `ThreeBrains/sim_results/full study - 10 iterations/`.
-- **Ablation study (Table VII):** its raw simulator logs are checked in
-  as `ThreeBrains/sim_results/Ablation test.zip` — extract this into
-  `FLaskAPIs/ablation_results_final/sim_results/` before running
-  `plot_ablation_results.py`; that's where its `SIM_RESULTS_DIR` looks by
-  default. The matching decision logs are already checked in at
-  `FLaskAPIs/ablation_results_final/decision_logs/`.
-- **λ sensitivity (Table V):** fully reproducible as-is — both required
-  inputs (`Lambda testing_Flask.zip` and `Lambda testing_Simresults.zip`)
-  are checked into `FLaskAPIs/`, and `lambda_sensitivity_table.py` reads
-  zip archives directly, no extraction needed.
-- **R_max sensitivity:** discussed in the paper (Section V-D-2) in prose
-  only — there is no dedicated table for it, so there's no script here to
-  reproduce one. Supporting raw data is checked in at
-  `ThreeBrains/sim_results/Rmax testing.zip` and
-  `FLaskAPIs/rmax_test/decision_logs/` for anyone who wants to look at it
-  directly.
+## Separate tuning plan (after the two diagnostics are reviewed)
 
-If any of the above is still missing for a given table, regenerating it
-from absolute scratch means actually running the simulator sweep yourself,
-which — 10 seeded iterations × up to 4 policies × up to 18 vehicle counts —
-is a real compute job, not a quick script run.
+Predeclare a small grid: reference eta in {0.05, 0.1, 0.2}, mode in
+{fixed, scaled_k5}; QoS threshold remains 0.20 for this isolated study.
+Use separate development runs, for example iterations 1001–1003 if unused
+(verify the printed SIMULATION_SEED; the inspected Java convention is
+20260828 + iteration). Use loads 900 and 1800, the same catalogue and paired
+seeds for each setting. Record the same tuning budget for every K being studied.
 
-Three scripts (`plot_ablation_results.py`, `scope_statistics.py`,
-`catalogue_sensitivity/catalogue_results_table.py`) previously had the
-original author's personal machine paths (`/Users/nancyboughannam/...`)
-hardcoded as defaults. These have been changed to repository-relative
-defaults, overridable with environment variables — see each script's
-top-of-file comments.
+Choose based on a predeclared realized performance objective matching the
+failure/deadline-normalized service cost, using the SAME normalization and
+application weights; raw service time alone is not that objective. Retain both
+component metrics and churn. Inspect whether the existing statistics scripts
+already calculate that objective before adding a new aggregator.
 
-## Known limitations
+Freeze settings before the final 100–1800 sweep. Reserve evaluation seeds not
+used to select parameters, report uncertainty, and document that the original
+eta=0.1 reference and the revised adaptation are different experiments.
+Neither the grid nor scaled_k5 is an assertion that the baseline must beat SCOPE.
 
-This section says the same things directly rather than leaving you to
-discover them:
+## Provenance of the completed full-catalogue diagnostic
 
-- **The paper's methods section states train/validation/test was split by
-  hand-picking iterations 1, 2, 4 / 3 / 5.** The code (`prepare_candidate_dataset.py`,
-  `split_run_ids()`) actually does a seeded random shuffle of iteration IDs
-  and takes the resulting assignment — it isn't a manual choice, it's a
-  deterministic-but-automatic one. The committed dataset summary
-  (`scope_candidate_dataset/candidate_dataset_summary.json`) confirms the
-  shuffle landed on exactly that assignment. Worth knowing if you're
-  trying to reproduce this split with a different seed and get a different
-  outcome — that's expected, not a bug.
-- **The `orchestrator_policies` switch between the main comparison and the
-  ablation study is a manual config edit**, not a command-line flag (see
-  above).
-- **This repo is large to clone**, deliberately — the raw simulator output
-  under `ThreeBrains/sim_results/` (split into per-iteration folders to
-  stay under GitHub's 100MB per-file limit) plus the various result CSVs
-  and vendored `.jar` dependencies add up to several hundred MB. That's a
-  conscious trade-off for reproducibility, not an oversight: everything
-  needed to verify the paper's numbers is a `git clone` away, no external
-  hosting account required. If clone size ever becomes a real problem,
-  Git LFS or an external host (e.g. Zenodo, which would also get you a
-  citable DOI) is the way out — that would require rewriting git history,
-  so it hasn't been done here.
-- **Licensing**: see `NOTICE.md`. Short version — this repo mixes MIT
-  (SCOPE's own code) and GPLv3 (the vendored `ThreeBrains` simulator fork)
-  under one roof, which is legally fine because the two only talk to each
-  other over HTTP, but it does mean the two directories are not
-  interchangeable if you plan to reuse or redistribute parts of this code.
-- **This evaluation is entirely simulation-based** (EdgeCloudSim, a
-  synthetic vehicular ITS scenario). As the paper's own conclusion states,
-  the candidate-performance predictors are trained and evaluated on
-  simulator-generated data; how they'd hold up on real telemetry, with
-  noisy or delayed measurements, is explicitly future work, not something
-  this repository demonstrates.
+Received Python archive: shared_full_ablation01.zip
+SHA256: 9b1045efd39485a814a5f15c98a64f90eee53f81d55edddc7cfcea91bb89a918
+Received Java archive: shared_k25_ablation01(2).zip
+SHA256: 3854e4c521fce227b33bd03321a10d949b12fa5e8b1d2ceef8d2ca9f772f30f5
+Catalogue SHA256: 39ee000d61f300aaad81e7c24c4cc17a83687133e3ef877736a9f5ab55fb0ff3
 
-## Paper status
+The Java archive's internal directory retains the old k25 name. The supplied
+console run (06 November 2026, 08:52:53–08:55:31) matches all four Java result
+counts, service times and finish times. Python log timestamps and behavior align.
+This is strong evidence of the matching full-catalogue experiment. The console
+excerpt does not print the literal output path; do not claim that pathname was
+independently confirmed. Preserve the original archive and record the naming
+mistake instead of overwriting it. No repeat is necessary solely for its name.
 
-*"Stability-Aware Multi-Timescale Orchestration for IoE Edge–Cloud Systems"*
-is currently unpublished and under submission. A formal citation (venue,
-year, DOI) will be added here once it's accepted — for now, this repository
-is the reference if you want to link to the work in progress.
+Original EXP3 source SHA256, verified against the run manifest:
+f803275240b44f24d5338d02d800706d5e297ce3211fafe71e34431bd1f071ed
 
-## License
+## Validation and limitations
 
-MIT for everything except `ThreeBrains/`, which stays GPLv3. See `LICENSE`
-and `NOTICE.md` for the full explanation and what it means if you reuse
-this code.
+13 synthetic unit/integration tests pass locally: startup, saved probabilities,
+retention, random same-arm draws, unexpected application, state reset/isolation,
+actual-K scaling, configuration validation, Flask API/logging, negative fixed-eta
+control, scaled example and runner checksum/reuse checks.
+No new EdgeCloudSim experiment has been executed by the assistant. Local tests
+verify implementation behavior, not comparative performance or paper fidelity.
 
-## Contact
+Paper audited: Donassolo et al., Online Reconfiguration of IoT Applications in
+the Fog: The Information-Coordination Trade-Off, TPDS 33(5), 2022.
+https://polaris.imag.fr/panayotis.mertikopoulos/files/FogIoT.pdf
+DOI: 10.1109/TPDS.2021.3097281
 
-Nancy Boughannam — University of Haute Alsace, Mulhouse, France —
-boughannamnancy@gmail.com
+The paper supports a five-host experiment, eta=.1, softmax importance updates,
+and a reactive trigger. The deterministic initialization/retention semantics
+here are our explicit adaptation; full fidelity to author code is not verified.

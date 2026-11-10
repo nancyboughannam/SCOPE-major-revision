@@ -10,6 +10,11 @@ It keeps entire simulation iterations separated, uses validation data for model
 selection/early stopping, and touches the test iteration only for final reporting.
 It also trains a state-only XGBoost ablation so that good results caused only by
 workload/state features are not mistaken for candidate-configuration learning.
+
+./.venv-revision/bin/python train_candidate_xgboost.py \
+  --data-dir revision_training_v3/dataset \
+  --output-dir revision_training_v3/xgboost_results
+
 """
 
 from __future__ import annotations
