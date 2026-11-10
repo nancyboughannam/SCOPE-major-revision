@@ -35,13 +35,20 @@ Keep this terminal open while Java runs:
 python run_revision_services.py --models revision_training_v4/xgboost_results --output revision_results/new_experiment --diagnostic --include-rt-opt
 ```
 
-The launcher explicitly uses lambda 0.20, R_max 0.15, full-catalogue EXP3,
+The launcher defaults to lambda 0.20 and explicitly uses R_max 0.15, full-catalogue EXP3,
 equal failure/service weights and the existing common candidate catalogue.
 It records settings and model/source hashes, verifies service readiness and
 normalization, and refuses existing output directories or occupied ports.
 `--catalogue /path/to/catalogue.csv` overrides the shared candidate source.
 Omit `--include-rt-opt` when the simulation does not use RT_OPT.
 Omit `--diagnostic` for overhead measurements: full request diagnostics add I/O.
+
+For a declared development sensitivity study, add `--lambda 0.05` (or another
+value in [0,1]). This overrides the SCOPE switching penalty only; the hard
+budget remains 0.15 and EXP3's objective is unchanged. Every experiment must
+use a new output directory. The selected value is recorded in `experiment.json`.
+Keep calibration runs separate from the final evaluation and report the
+performance/churn tradeoff across all tested settings.
 
 Rebuild Java from this branch. Add this **VM option**, separately from the
 five program arguments:

@@ -28,9 +28,13 @@ def main():
     parser.add_argument('--catalogue', type=Path,
                         default=BASE/'scope_candidate_dataset/candidate_dataset_train.csv')
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--lambda', dest='lambda_value', type=float, default=0.20,
+                        help='SCOPE switching-penalty weight in [0,1]; default: 0.20.')
     parser.add_argument('--diagnostic', action='store_true')
     parser.add_argument('--include-rt-opt', action='store_true', help='Also start Optimizer.py on port 5001.')
     args = parser.parse_args()
+    if not 0.0 <= args.lambda_value <= 1.0:
+        parser.error('--lambda must be a finite number in [0,1]')
     model_dir, catalogue, output = args.models.resolve(), args.catalogue.resolve(), args.output.resolve()
     manifest_path = model_dir/'model_manifest.json'
     manifest = json.loads(manifest_path.read_text())
@@ -53,7 +57,7 @@ def main():
         'SCOPE_CANDIDATE_DATASET': str(catalogue),
         'SCOPE_ABLATION_RESULTS_DIR': str(output/'scope'),
         'SCOPE_DIAGNOSTIC_DIR': str(output/'scope_diagnostics'),
-        'SCOPE_HARD_STABILITY': '1', 'SCOPE_LAMBDA': '0.20', 'SCOPE_R_MAX': '0.15',
+        'SCOPE_HARD_STABILITY': '1', 'SCOPE_LAMBDA': str(args.lambda_value), 'SCOPE_R_MAX': '0.15',
         'SCOPE_PORT': '5002', 'SCOPE_W_FAILURE': '0.50', 'SCOPE_W_SERVICE': '0.50',
         'EXP3_MC_CANDIDATE_DATASET': str(catalogue), 'EXP3_MC_ARM_COUNT': '0',
         'EXP3_MC_NORMALIZATION_MANIFEST': str(manifest_path),
