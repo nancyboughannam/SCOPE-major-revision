@@ -50,6 +50,46 @@ them, the original arrival generator is preserved. The runner supplies them
 only to its isolated Java executions. It compiles into the result directory
 and never changes the IDE build or the input configuration files.
 
+## Application-mix diagnostic
+
+Use `--app-rate-multipliers TRAFFIC DANGER INFOTAINMENT` instead of
+`--rate-multiplier` to change each application's arrival rate separately at the
+same cutoff. The order follows `applications.xml`. For the supplied application
+configuration, this shifts demand toward danger assessment:
+
+```bash
+./.venv-revision/bin/python run_adaptation_check.py \
+  --models revision_training_v4/xgboost_results \
+  --config ../ThreeBrains/scripts/sample_app5/config/penalty_config.properties \
+  --output revision_results/v4_mix_danger_ite1007 \
+  --iteration 1007 \
+  --app-rate-multipliers 0.5 1.7142857142857142 1
+```
+
+The paired opposite shift uses `1.5 0.2857142857142857 1` and a fresh output
+directory. These values transfer 0.05 expected tasks/second/vehicle between
+traffic management and danger assessment, given the supplied 30/35/35 vehicle
+shares and 3/5/15-second inter-arrivals. Total expected task rate is unchanged;
+realized counts vary, and CPU/network demand changes because task sizes differ.
+The Java property is `scope.workload.appRateMultipliers=0.5,1.7142857142857142,1`.
+It cannot be combined with the common rate property. No workload change is
+enabled in ordinary runs unless these diagnostic properties are supplied.
+
+Declare both directions and a finite development seed set before inspecting
+outcomes. Keep models, lambda, hard budget, infrastructure, and deadlines fixed.
+Report all cases, including ties or regressions. A parameter change is not itself
+a benefit: compare measured post-change outcomes against frozen SCOPE, including
+per-application failures and deadline misses. This isolates continued parameter
+updates; it does not demonstrate superiority over AI_BASED or a tuned static
+baseline. Changes in the best model-predicted candidate are not proof that the
+best actual configuration changed.
+
+Full task fingerprints and pre-change requests must match within each pair.
+Do not assume identical pre-change realizations across different workload
+profiles: the legacy generator shares an RNG for task attributes and subsequent
+vehicle assignments. `WORKLOAD_PHASE_TASKS` records generated tasks before and
+after the step for each application, excluding tasks beyond simulation end.
+
 ## Outputs and interpretation
 
 The result directory contains copied input configurations, source/model/JAR

@@ -1,6 +1,6 @@
 package edu.boun.edgecloudsim.applications.sample_app5;
 
-/** Optional, policy-independent arrival-rate step for paired diagnostic runs. */
+/** Optional, policy-independent arrival-rate steps for paired diagnostic runs. */
 public final class ArrivalRateSchedule {
     private final double shiftSeconds;
     private final double multiplier;
@@ -15,20 +15,38 @@ public final class ArrivalRateSchedule {
     }
 
     public static ArrivalRateSchedule fromProperties(double simulationSeconds) {
+        return fromProperties(simulationSeconds, 1)[0];
+    }
+
+    public static ArrivalRateSchedule[] fromProperties(double simulationSeconds, int applications) {
+        if (applications <= 0) throw new IllegalArgumentException("Application count must be positive");
         String shift = System.getProperty("scope.workload.shiftSeconds");
         String rate = System.getProperty("scope.workload.rateMultiplier");
-        if (shift == null && rate == null) {
-            return new ArrivalRateSchedule(simulationSeconds, 1.0);
+        String perApp = System.getProperty("scope.workload.appRateMultipliers");
+        ArrivalRateSchedule[] schedules = new ArrivalRateSchedule[applications];
+        if (shift == null && rate == null && perApp == null) {
+            for (int app = 0; app < applications; app++) {
+                schedules[app] = new ArrivalRateSchedule(simulationSeconds, 1.0);
+            }
+            return schedules;
         }
-        if (shift == null || rate == null) {
-            throw new IllegalArgumentException("Set both scope.workload.shiftSeconds and scope.workload.rateMultiplier");
+        if (shift == null || (rate == null) == (perApp == null)) {
+            throw new IllegalArgumentException("Set scope.workload.shiftSeconds and exactly one of "
+                    + "scope.workload.rateMultiplier or scope.workload.appRateMultipliers");
         }
-        ArrivalRateSchedule schedule = new ArrivalRateSchedule(
-                Double.parseDouble(shift), Double.parseDouble(rate));
-        if (schedule.shiftSeconds >= simulationSeconds) {
+        double shiftSeconds = Double.parseDouble(shift);
+        if (shiftSeconds >= simulationSeconds) {
             throw new IllegalArgumentException("Arrival shift must precede simulation end");
         }
-        return schedule;
+        String[] rates = perApp == null ? null : perApp.split(",", -1);
+        if (rates != null && rates.length != applications) {
+            throw new IllegalArgumentException("Provide one arrival multiplier for each application in XML order");
+        }
+        for (int app = 0; app < applications; app++) {
+            schedules[app] = new ArrivalRateSchedule(shiftSeconds,
+                    Double.parseDouble(rates == null ? rate : rates[app].trim()));
+        }
+        return schedules;
     }
 
     /** Integrate a sampled baseline exponential interval across the rate step.

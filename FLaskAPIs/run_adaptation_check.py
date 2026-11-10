@@ -192,12 +192,20 @@ def main():
     p.add_argument('--minutes', type=float, default=60)
     p.add_argument('--warmup-minutes', type=float, default=3)
     p.add_argument('--shift-seconds', type=float, default=1800)
-    p.add_argument('--rate-multiplier', type=float, default=1.5)
+    rate = p.add_mutually_exclusive_group()
+    rate.add_argument('--rate-multiplier', type=float,
+                      help='Common post-change arrival multiplier (default: 1.5).')
+    rate.add_argument('--app-rate-multipliers', type=float, nargs=3,
+                      metavar=('TRAFFIC', 'DANGER', 'INFOTAINMENT'),
+                      help='Post-change arrival multipliers in applications.xml order; replaces the common multiplier.')
     p.add_argument('--lambda', dest='penalty', type=float, default=.05)
     args = p.parse_args()
-    if not all(math.isfinite(x) for x in (args.minutes,args.warmup_minutes,args.shift_seconds,args.rate_multiplier,args.penalty)):
+    if args.rate_multiplier is None and args.app_rate_multipliers is None:
+        args.rate_multiplier = 1.5
+    rates = args.app_rate_multipliers or [args.rate_multiplier]
+    if not all(math.isfinite(x) for x in (args.minutes,args.warmup_minutes,args.shift_seconds,args.penalty,*rates)):
         p.error('Experiment parameters must be finite')
-    if not (args.vehicles > 0 and args.iteration >= 0 and 0 <= args.penalty <= 1 and args.rate_multiplier > 0
+    if not (args.vehicles > 0 and args.iteration >= 0 and 0 <= args.penalty <= 1 and all(x > 0 for x in rates)
             and 0 <= args.warmup_minutes*60 < args.shift_seconds < args.minutes*60):
         p.error('Invalid load, iteration, penalty, or phase boundaries')
     if min(args.shift_seconds-args.warmup_minutes*60, args.minutes*60-args.shift_seconds) < 180:
@@ -250,6 +258,7 @@ def main():
     plan = dict(status='starting', iteration=args.iteration, seed=20260828+args.iteration,
                 vehicles=args.vehicles, minutes=args.minutes, warmup_minutes=args.warmup_minutes,
                 shift_seconds=args.shift_seconds, rate_multiplier=args.rate_multiplier,
+                app_rate_multipliers=args.app_rate_multipliers,
                 freeze_seconds=args.shift_seconds, penalty=args.penalty, r_max=.15,
                 modes=['adaptive','frozen'], normalization=normalization, input_sha256=hashes,
                 interpretation='Development paired control; no best-static or overhead claim',
@@ -274,9 +283,12 @@ def main():
                         SCOPE_ADAPTATION_FREEZE_SECONDS=str(args.shift_seconds))
         env.update(settings)
         write_json(folder/'settings.json', settings)
+        rate_option = (f'-Dscope.workload.rateMultiplier={args.rate_multiplier}'
+                       if args.app_rate_multipliers is None else
+                       '-Dscope.workload.appRateMultipliers='+','.join(map(str, args.app_rate_multipliers)))
         command = [java,'-Xmx2g','-Dscope.optimizer.failFast=true',
                    f'-Dscope.workload.shiftSeconds={args.shift_seconds}',
-                   f'-Dscope.workload.rateMultiplier={args.rate_multiplier}',
+                   rate_option,
                    '-cp',str(classes)+os.pathsep+library_path,
                    'edu.boun.edgecloudsim.applications.sample_app5.VehicularMainApp',
                    str(inputs/'experiment.properties'),str(inputs/'edge_devices.xml'),

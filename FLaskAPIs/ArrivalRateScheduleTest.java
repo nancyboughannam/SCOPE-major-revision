@@ -29,6 +29,34 @@ public class ArrivalRateScheduleTest {
         System.clearProperty("scope.workload.shiftSeconds");
         System.clearProperty("scope.workload.rateMultiplier");
         if (rejected != 6) throw new AssertionError("Invalid schedules accepted");
-        System.out.println("Arrival schedule: 9 timing checks and 6 invalid-setting checks passed");
+        System.setProperty("scope.workload.shiftSeconds", "10");
+        System.setProperty("scope.workload.appRateMultipliers", "0.5,2,1");
+        ArrivalRateSchedule[] schedules = ArrivalRateSchedule.fromProperties(100, 3);
+        equal(schedules[0].nextArrival(9, 3), 14);
+        equal(schedules[1].nextArrival(9, 3), 11);
+        equal(schedules[2].nextArrival(9, 3), 12);
+        equal(schedules[0].nextArrival(3, 2), 5);
+        equal(schedules[1].nextArrival(3, 2), 5);
+        equal(schedules[2].nextArrival(3, 2), 5);
+        int invalid = 0;
+        for (String rates : new String[]{"1,2", "1,2,3,4", "1,0,1", "1,NaN,1", "1,Infinity,1", "1,,1"}) {
+            System.setProperty("scope.workload.appRateMultipliers", rates);
+            try { ArrivalRateSchedule.fromProperties(100, 3); }
+            catch (IllegalArgumentException expected) { invalid++; }
+        }
+        System.setProperty("scope.workload.appRateMultipliers", "1,1,1");
+        System.setProperty("scope.workload.rateMultiplier", "1");
+        try { ArrivalRateSchedule.fromProperties(100, 3); }
+        catch (IllegalArgumentException expected) { invalid++; }
+        System.clearProperty("scope.workload.rateMultiplier");
+        System.clearProperty("scope.workload.shiftSeconds");
+        try { ArrivalRateSchedule.fromProperties(100, 3); }
+        catch (IllegalArgumentException expected) { invalid++; }
+        System.clearProperty("scope.workload.appRateMultipliers");
+        if (invalid != 8) throw new AssertionError("Invalid application schedules accepted");
+        for (ArrivalRateSchedule schedule : ArrivalRateSchedule.fromProperties(100, 3)) {
+            equal(schedule.nextArrival(9, 3), 12);
+        }
+        System.out.println("Arrival schedule: common/app-specific timing and invalid-setting checks passed");
     }
 }

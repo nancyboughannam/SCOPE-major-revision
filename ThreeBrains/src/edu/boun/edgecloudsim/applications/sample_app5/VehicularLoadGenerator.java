@@ -37,7 +37,8 @@ public class VehicularLoadGenerator extends LoadGeneratorModel {
     @Override
     public void initializeModel() {
         taskList = new ArrayList<TaskProperty>();
-        ArrivalRateSchedule arrivalSchedule = ArrivalRateSchedule.fromProperties(simulationTime);
+        ArrivalRateSchedule[] arrivalSchedules = ArrivalRateSchedule.fromProperties(
+                simulationTime, SimSettings.getInstance().getTaskLookUpTable().length);
 
         // Assign each mobile device (vehicle) a specific application type (task type)
         taskTypeOfDevices = new int[numberOfMobileDevices];
@@ -60,6 +61,7 @@ public class VehicularLoadGenerator extends LoadGeneratorModel {
             }
 
             taskTypeOfDevices[i] = randomTaskType;
+            ArrivalRateSchedule arrivalSchedule = arrivalSchedules[randomTaskType];
 
             // Get task generation parameters from lookup table
             double poissonMean = SimSettings.getInstance().getTaskLookUpTable()[randomTaskType][2];
@@ -145,7 +147,19 @@ public class VehicularLoadGenerator extends LoadGeneratorModel {
                 SimLogger.printLine("WORKLOAD_AUDIT shift_seconds="
                         + System.getProperty("scope.workload.shiftSeconds")
                         + " rate_multiplier=" + System.getProperty("scope.workload.rateMultiplier")
+                        + " app_rate_multipliers=" + System.getProperty("scope.workload.appRateMultipliers")
                         + " scheduled_tasks=" + taskList.size() + " sha256=" + hash);
+                long[][] phaseCounts = new long[arrivalSchedules.length][2];
+                double shift = Double.parseDouble(System.getProperty("scope.workload.shiftSeconds"));
+                for (TaskProperty task : taskList) {
+                    if (task.getStartTime() < simulationTime) {
+                        phaseCounts[task.getTaskType()][task.getStartTime() < shift ? 0 : 1]++;
+                    }
+                }
+                for (int app = 0; app < phaseCounts.length; app++) {
+                    SimLogger.printLine("WORKLOAD_PHASE_TASKS app=" + app
+                            + " before=" + phaseCounts[app][0] + " after=" + phaseCounts[app][1]);
+                }
             } catch (NoSuchAlgorithmException error) {
                 throw new IllegalStateException(error);
             }
