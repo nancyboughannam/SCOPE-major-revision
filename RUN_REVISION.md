@@ -1,5 +1,9 @@
 # Running the telemetry-consistent revision
 
+For the automatic paired workload-change diagnostic, see
+[RUN_ADAPTATION.md](RUN_ADAPTATION.md). It manages the Python service and both
+Java executions, so stop the launcher described below before using it.
+
 This branch corrects CPU telemetry units and coverage, stores objective
 normalization in the model manifest, and validates optimizer responses before
 applying them. It does not change the tier-routing hierarchy.
