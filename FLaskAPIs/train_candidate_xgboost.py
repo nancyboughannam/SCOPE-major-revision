@@ -20,6 +20,7 @@ workload/state features are not mistaken for candidate-configuration learning.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -35,6 +36,7 @@ import sklearn
 import xgboost
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from xgboost import XGBRegressor
+from scope_objective import CPU_FEATURES, CURRENT_TELEMETRY, LEGACY_TELEMETRY, training_support
 
 
 SEED = 42
@@ -103,6 +105,11 @@ def parse_args() -> argparse.Namespace:
         default=Path("scope_candidate_xgboost_results"),
         help="Directory that will receive models, metrics, plots, and reports.",
     )
+    parser.add_argument('--exclude-cpu-telemetry', action='store_true',
+                        help='Exclude the two CPU features when reusing legacy, incorrectly scaled telemetry.')
+    parser.add_argument('--telemetry-schema', choices=[LEGACY_TELEMETRY, CURRENT_TELEMETRY],
+                        default=LEGACY_TELEMETRY,
+                        help='Use vm_percent_all_vms_v1 only for data collected with the fixed simulator.')
     return parser.parse_args()
 
 
@@ -419,6 +426,8 @@ def main() -> None:
     model_dir.mkdir(parents=True, exist_ok=True)
 
     frames, candidate_features = load_and_validate(args.data_dir)
+    if args.exclude_cpu_telemetry:
+        candidate_features = [f for f in candidate_features if f not in CPU_FEATURES]
     state_only_features = [
         feature for feature in candidate_features if not feature.startswith("candidate_")
     ]
@@ -605,7 +614,14 @@ def main() -> None:
         for split in SPLITS
     }
     manifest = {
-        "format_version": 1,
+        "format_version": 2,
+        "normalization": training_support(frames['train']),
+        "normalization_source": "training_partition_only",
+        "telemetry_schema": "unused" if args.exclude_cpu_telemetry else args.telemetry_schema,
+        "excluded_features": sorted(CPU_FEATURES) if args.exclude_cpu_telemetry else [],
+        "split_sha256": {split: hashlib.sha256(
+            (args.data_dir / f'candidate_dataset_{split}.csv').read_bytes()).hexdigest()
+            for split in SPLITS},
         "random_seed": SEED,
         "row_counts": {split: int(len(frames[split])) for split in SPLITS},
         "split_run_ids": {

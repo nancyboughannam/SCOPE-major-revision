@@ -1081,24 +1081,17 @@ public class VehicularEdgeOrchestrator extends EdgeOrchestrator {
     }
 
     private double[] getCurrentServerLoads() {
-        List<Datacenter> datacenters = SimManager.getInstance()
-                .getEdgeServerManager().getDatacenterList();
-        double[] loads = new double[datacenters.size()];
-        for (int i = 0; i < datacenters.size(); i++) {
-            Datacenter datacenter = datacenters.get(i);
-            double load = 0.0;
-            if (!datacenter.getHostList().isEmpty()) {
-                EdgeHost host = (EdgeHost) datacenter.getHostList().get(0);
-                if (!host.getVmList().isEmpty()) {
-                    EdgeVM vm = (EdgeVM) host.getVmList().get(0);
-                    double totalUtilization = vm.getCloudletScheduler()
-                            .getTotalUtilizationOfCpu(CloudSim.clock());
-                    if (vm.getNumberOfPes() > 0) {
-                        load = (totalUtilization / vm.getNumberOfPes()) * 100.0;
-                    }
-                }
-            }
-            loads[i] = clamp(load, 0.0, 100.0);
+        if (!edgeInventoryReady) initializeEdgeVmInventory();
+        return edgeVmLoads(availableEdgeVms, CloudSim.clock());
+    }
+
+    static double[] edgeVmLoads(List<EdgeVM> vms, double time) {
+        double[] loads = new double[vms.size()];
+        for (int i = 0; i < vms.size(); i++) {
+            // Scheduler totals are percentages already, independent of PE count.
+            loads[i] = edgeVmLoadPercent(vms.get(i), time);
+            if (!Double.isFinite(loads[i]) || loads[i] < 0)
+                throw new IllegalStateException("Invalid edge CPU telemetry");
         }
         return loads;
     }
@@ -1184,12 +1177,8 @@ public class VehicularEdgeOrchestrator extends EdgeOrchestrator {
 
     private double configurationDistance(CandidateConfiguration first,
             CandidateConfiguration second) {
-        double distance = Math.abs(first.alpha - second.alpha);
-        for (int i = 0; i < NUM_APP_TYPES; i++) {
-            distance += Math.abs(first.wLoad[i] - second.wLoad[i]);
-            distance += Math.abs(first.threshold[i] - second.threshold[i]) / 100.0;
-        }
-        return distance;
+        return OptimizerReply.distance(first.alpha, first.wLoad, first.threshold,
+                second.alpha, second.wLoad, second.threshold);
     }
 
     private void updatePreviousConfiguration() {
@@ -1444,6 +1433,7 @@ public class VehicularEdgeOrchestrator extends EdgeOrchestrator {
 
                 StringBuilder json = new StringBuilder();
                 json.append("{");
+                json.append("\"telemetry_schema\":\"vm_percent_all_vms_v1\",");
                 if (policy.equals(EXP3_MC_POLICY)) {
                     json.append("\"feedback_protocol\":\"admission_cohort_v1\",");
                     json.append("\"closed_window_id\":").append(exp3Window).append(",");
@@ -1516,6 +1506,8 @@ public class VehicularEdgeOrchestrator extends EdgeOrchestrator {
 
                 URL url = new URL(targetUrl);
                 HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+                connection.setConnectTimeout(5000);
+                connection.setReadTimeout(30000);
                 connection.setRequestMethod("POST");
                 connection.setRequestProperty("Content-Type", "application/json; utf-8");
                 connection.setDoOutput(true);
@@ -1534,24 +1526,12 @@ public class VehicularEdgeOrchestrator extends EdgeOrchestrator {
                     throw new IOException("Optimizer returned an empty response");
                 }
 
-                String response = responseLine.replace("{", "")
-                        .replace("}", "").replace("\"", "");
-                String[] sections = response.split("\\|");
-                for (String section : sections) {
-                    if (section.startsWith("ALPHA")) {
-                        currentAlpha = Double.parseDouble(section.split(":")[1]);
-                    } else if (section.contains(":")) {
-                        String[] parts = section.split(":");
-                        if (parts.length == 4) {
-                            int id = Integer.parseInt(parts[0]);
-                            if (id >= 0 && id < NUM_APP_TYPES) {
-                                wLoadPerType[id] = Double.parseDouble(parts[1]);
-                                wDistPerType[id] = Double.parseDouble(parts[2]);
-                                thresholdPerType[id] = Double.parseDouble(parts[3]);
-                            }
-                        }
-                    }
-                }
+                OptimizerReply reply = OptimizerReply.parse(responseLine);
+                CandidateConfiguration validated = new CandidateConfiguration();
+                validated.alpha = reply.alpha;
+                System.arraycopy(reply.weights, 0, validated.wLoad, 0, NUM_APP_TYPES);
+                System.arraycopy(reply.thresholds, 0, validated.threshold, 0, NUM_APP_TYPES);
+                applyCandidateConfiguration(validated);
 
                 if (policy.equals(EXP3_MC_POLICY)) exp3Feedback.acknowledge(exp3Ready);
                 CandidateConfiguration afterUpdate = captureCurrentConfiguration();
@@ -1565,6 +1545,10 @@ public class VehicularEdgeOrchestrator extends EdgeOrchestrator {
 
         } catch (Exception e) {
             SimLogger.printLine(policy + " Error: " + e.getMessage());
+            // Enable in research runs so a failed service cannot masquerade as
+            // a successful adaptive policy that happened to keep its settings.
+            if (Boolean.getBoolean("scope.optimizer.failFast"))
+                throw new IllegalStateException("Optimizer failed for " + policy, e);
         } finally {
             startTrainingWindow(timestamp, inputState);
             resetOptimizerWindowCounters();

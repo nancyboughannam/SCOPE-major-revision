@@ -28,6 +28,9 @@ subprocess.run([javac, '-classpath', test_cp, '-d', str(classes),
                 str(Path(__file__).with_name('EdgeVmLoadUnitsTest.java'))], check=True)
 subprocess.run([java, '-cp', test_cp,
                 'edu.boun.edgecloudsim.applications.sample_app5.EdgeVmLoadUnitsTest'], check=True)
+subprocess.run([javac, '-classpath', test_cp, '-d', str(classes),
+                str(Path(__file__).with_name('OptimizerReplyTest.java'))], check=True)
+subprocess.run([java, '-cp', test_cp, 'OptimizerReplyTest'], check=True)
 settings = {'simulation_time':'6','warm_up_period':'0','min_number_of_mobile_devices':'100',
             'max_number_of_mobile_devices':'1800','mobile_device_counter_size':'1700',
             'orchestrator_policies':'RAIDER_TRAX','file_log_enabled':'true'}
@@ -60,7 +63,8 @@ for n in (100,1800):
         raise AssertionError('No non-first VM selected: '+str(p))
     summaries.append({'devices':n,'configured_vms':expected,'selectable_vms':len(rows),
                       'distinct_vms_selected':len(used),'nonfirst_vms_selected':len(nonfirst)})
-summary={'status':'passed','selector_checks':7,'cpu_load_unit_checks':4,'patch_version':3,'capacity_checks':8,'policy':'RAIDER_TRAX',
+summary={'status':'passed','selector_checks':7,'cpu_load_unit_checks':5,'patch_version':4,'capacity_checks':8,
+         'optimizer_reply_checks':15,'normalized_distance_checks':2,'policy':'RAIDER_TRAX',
          'purpose':'shared selector mechanics; not a SCOPE performance evaluation',
          'scenarios':summaries,'results':str(out),
          'input_sha256':{name:hashlib.sha256((config/name).read_bytes()).hexdigest()
