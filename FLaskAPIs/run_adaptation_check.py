@@ -230,6 +230,9 @@ def main():
         raise ValueError('Training normalization is required')
     check_telemetry(manifest, CURRENT_TELEMETRY)
     with socket.socket() as sock:
+        # Match Flask's address reuse: a closed prior run may leave TIME_WAIT
+        # connections, while a live listener must still fail this availability check.
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind(('127.0.0.1', 5002))
     output.mkdir(parents=True)
     inputs, classes = output/'inputs', output/'classes'
