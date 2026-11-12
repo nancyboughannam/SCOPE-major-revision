@@ -190,12 +190,19 @@ def verify_static(path,expected):
     core.require(len(observed)==7 and all(abs(a-b)<=1e-12 for a,b in zip(observed,expected)),'Static configuration differs')
 
 
+def routing_schema(plan, policy):
+    # Only the separately registered EXP3 routing ablation may use edge-first.
+    schema = plan.get('exp3_routing_schema', core.SCHEMA) if policy == 'EXP3_MC' else core.SCHEMA
+    core.require(schema in [core.SCHEMA, 'edge_first_v1'], 'Unsupported routing schema')
+    return schema
+
+
 def service_environment(out,folder,plan,job):
     lam=0. if job['label']=='HARD_ONLY' else plan['lambda_value']
     freeze=plan['shift_seconds'] if job['label']=='SCOPE_FROZEN' else None
     e=calibration.service_env(out,folder,lam,freeze)
     e.update(EXP3_MC_CANDIDATE_DATASET=str(out/'dataset/candidate_dataset_train.csv'),
-        EXP3_MC_NORMALIZATION_MANIFEST=str(out/'models/model_manifest.json'),EXP3_MC_RESULTS_DIR=str(folder/'exp3'),
+        EXP3_MC_NORMALIZATION_MANIFEST=str(out/plan.get('exp3_normalization_manifest', 'models/model_manifest.json')),EXP3_MC_RESULTS_DIR=str(folder/'exp3'),
         EXP3_MC_EXPERIMENT_ID=job['key'],EXP3_MC_PORT='5003',EXP3_MC_ARM_COUNT=str(plan['exp3']['arm_count']),
         EXP3_MC_QOS_THRESHOLD=str(plan['exp3']['qos_threshold']),EXP3_MC_W_FAILURE='.5',EXP3_MC_W_SERVICE='.5',
         EXP3_MC_ARM_SELECTION_SEED=str(plan['exp3']['arm_selection_seed']),EXP3_MC_SEED_OFFSET=str(plan['exp3']['seed_offset']))
@@ -228,7 +235,7 @@ def service(out,folder,plan,job):
                 except (OSError,ValueError):
                     core.require(time.monotonic()<end,'Service readiness timeout');time.sleep(.2);continue
                 support=core.read(out/'models/model_manifest.json')['normalization']
-                core.require(h['routing_schema']==core.SCHEMA and h['normalization']==support,'Service schema/normalization differs')
+                core.require(h['routing_schema']==routing_schema(plan,policy) and h['normalization']==support,'Service schema/normalization differs')
                 if port==5002:
                     lam=0. if job['label']=='HARD_ONLY' else plan['lambda_value']
                     core.require(h['lambda']==lam and h['r_max']==plan['r_max'] and h['hard_stability_enabled'],'Scope service settings differ')
@@ -291,7 +298,7 @@ def inspect_run(folder,plan,job):
     log=(folder/'java.log').read_text();policy=job['policy']
     core.require(log.count('Scenario finished at ')==1 and 'Simulation finished at ' in log,'Incomplete Java scenario')
     core.require(not any(t in log for t in ['Exception','ERROR','unexpected error','Training-data write failed']),'Java error reported')
-    if policy not in ['AI_BASED','RAIDER_TRAX','RANDOM']:core.require('ROUTING_SCHEMA='+core.SCHEMA in log,'Routing schema not applied')
+    if policy not in ['AI_BASED','RAIDER_TRAX','RANDOM']:core.require('ROUTING_SCHEMA='+routing_schema(plan,policy) in log,'Routing schema not applied')
     fingerprints=re.findall(r'WORKLOAD_AUDIT .*sha256=([a-f0-9]{64})',log)
     core.require(len(fingerprints)==1,'Missing workload audit')
     expected=0 if policy in ['RAIDER_TRAX','RANDOM'] else 3*len(range(70,plan['minutes']*60,60))
@@ -327,7 +334,7 @@ def simulate(out,plan,job,fixed):
     for k,v in values.items():
         pattern=r'(?m)^'+re.escape(k)+r'=.*$';text=re.sub(pattern,k+'='+str(v),text) if re.search(pattern,text) else text+'\n'+k+'='+str(v)+'\n'
     (folder/'config.properties').write_text(text);(folder/'weka').symlink_to(out/'inputs/weka',target_is_directory=True)
-    cmd=[plan['java'],'-Xmx2g','-Dscope.optimizer.failFast=true','-Dscope.deadlineTierGuard=true','-Dscope.auditWorkload=true',
+    cmd=[plan['java'],'-Xmx2g','-Dscope.optimizer.failFast=true','-Dscope.deadlineTierGuard='+str(routing_schema(plan,job['policy'])==core.SCHEMA).lower(),'-Dscope.auditWorkload=true',
          '-Dscope.logPerformanceWindows=true','-Dscope.trainingData.path='+str(folder/'candidate_windows.csv')]
     if job['policy']=='SCOPE_STATIC':
         chosen=job['static'] if job['group']=='calibration' else fixed[str(job['load'])]
