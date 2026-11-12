@@ -17,6 +17,16 @@ LEGACY_SUPPORT = {
 CPU_FEATURES = {"state_avg_edge_cpu", "state_max_edge_cpu"}
 LEGACY_TELEMETRY = "legacy_first_vm_v1"
 CURRENT_TELEMETRY = "vm_percent_all_vms_v1"
+LEGACY_ROUTING = "edge_first_v1"
+DEADLINE_ROUTING = "deadline_guard_v1"
+
+
+def check_routing(manifest, received_schema):
+    expected = manifest.get('routing_schema', LEGACY_ROUTING)
+    received = received_schema or LEGACY_ROUTING
+    if expected not in (LEGACY_ROUTING, DEADLINE_ROUTING) or received != expected:
+        raise ValueError(f"Routing schema mismatch: model={expected}, simulator={received}. "
+                         "Collect and retrain with matching routing semantics.")
 
 
 def validate_support(support):

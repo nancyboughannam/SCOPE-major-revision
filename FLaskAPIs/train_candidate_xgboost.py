@@ -36,7 +36,7 @@ import sklearn
 import xgboost
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from xgboost import XGBRegressor
-from scope_objective import CPU_FEATURES, CURRENT_TELEMETRY, LEGACY_TELEMETRY, training_support
+from scope_objective import CPU_FEATURES, CURRENT_TELEMETRY, LEGACY_TELEMETRY, training_support, LEGACY_ROUTING, DEADLINE_ROUTING
 
 
 SEED = 42
@@ -119,6 +119,9 @@ def load_and_validate(data_dir: Path) -> tuple[dict[str, pd.DataFrame], list[str
         raise FileNotFoundError(f"Missing feature schema: {schema_path}")
 
     schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    routing = schema.get('routing_schema', LEGACY_ROUTING)
+    if routing not in (LEGACY_ROUTING, DEADLINE_ROUTING):
+        raise ValueError('Unknown routing schema in dataset')
     schema_features = list(schema["feature_columns"])
     feature_columns = [c for c in schema_features if c not in METADATA_COLUMNS]
 
@@ -128,6 +131,9 @@ def load_and_validate(data_dir: Path) -> tuple[dict[str, pd.DataFrame], list[str
         if not path.exists():
             raise FileNotFoundError(f"Missing prepared split: {path}")
         frame = pd.read_csv(path)
+        row_routing = frame.get('routing_schema', pd.Series(LEGACY_ROUTING, index=frame.index))
+        if row_routing.isna().any() or set(row_routing) != {routing}:
+            raise ValueError(f'{split} routing does not match dataset schema')
         missing = set(feature_columns + list(TARGETS.values())) - set(frame.columns)
         if missing:
             raise ValueError(f"{split} is missing columns: {sorted(missing)}")
@@ -614,6 +620,7 @@ def main() -> None:
         for split in SPLITS
     }
     manifest = {
+        "routing_schema": json.loads((args.data_dir/'candidate_feature_schema.json').read_text()).get('routing_schema', LEGACY_ROUTING),
         "format_version": 2,
         "normalization": training_support(frames['train']),
         "normalization_source": "training_partition_only",

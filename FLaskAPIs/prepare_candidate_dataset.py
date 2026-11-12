@@ -90,7 +90,7 @@ def validate_columns(frame: pd.DataFrame) -> None:
 
 def clean_rows(frame: pd.DataFrame) -> pd.DataFrame:
     cleaned = frame.copy()
-    string_columns = {"run_id", "policy"}
+    string_columns = {"run_id", "policy", "routing_schema"}
     numeric_columns = [
         column for column in cleaned.columns if column not in string_columns
     ]
@@ -188,6 +188,11 @@ def main() -> None:
         raise FileNotFoundError(f"Raw dataset not found: {args.input}")
 
     raw = pd.read_csv(args.input)
+    if 'routing_schema' not in raw:
+        raw['routing_schema'] = 'edge_first_v1'
+    schemas = set(raw['routing_schema'].dropna())
+    if raw['routing_schema'].isna().any() or len(schemas) != 1 or not schemas <= {'edge_first_v1', 'deadline_guard_v1'}:
+        raise ValueError('Training data must have exactly one known routing schema; do not mix old/new rows.')
     validate_columns(raw)
     cleaned = clean_rows(raw)
     if cleaned.empty:
@@ -223,6 +228,7 @@ def main() -> None:
     ]
 
     schema = {
+        "routing_schema": next(iter(schemas)),
         "format": "one row per application per candidate-configuration window",
         "feature_columns": feature_columns,
         "target_columns": TARGET_COLUMNS,

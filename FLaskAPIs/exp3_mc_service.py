@@ -49,7 +49,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from flask import Flask, jsonify, request
-from scope_objective import LEGACY_SUPPORT, load_support
+import json
+from scope_objective import LEGACY_SUPPORT, load_support, check_routing, LEGACY_ROUTING
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -97,6 +98,7 @@ CANDIDATE_COLUMNS = [
 
 # Point this to the same model manifest used by SCOPE for revised experiments.
 NORMALIZATION_MANIFEST = os.getenv('EXP3_MC_NORMALIZATION_MANIFEST')
+ROUTING_MANIFEST = json.loads(Path(NORMALIZATION_MANIFEST).read_text()) if NORMALIZATION_MANIFEST else {}
 NORMALIZATION, NORMALIZATION_SOURCE = (load_support(NORMALIZATION_MANIFEST)
     if NORMALIZATION_MANIFEST else (dict(LEGACY_SUPPORT), 'legacy_reference'))
 TRAIN_FAILURE_MIN = NORMALIZATION['failure_min']
@@ -597,6 +599,7 @@ def health():
             "baseline": "EXP3-MC-adapted",
             "normalization": NORMALIZATION,
             "normalization_source": NORMALIZATION_SOURCE,
+            "routing_schema": ROUTING_MANIFEST.get('routing_schema', LEGACY_ROUTING),
             "candidate_count": len(CANDIDATE_CATALOGUE),
             "arm_count": ARM_COUNT,
             "arm_selection_seed": ARM_SELECTION_SEED,
@@ -621,6 +624,7 @@ def optimize():
         data = request.get_json(force=True)
         if not isinstance(data, dict):
             raise ValueError("Request JSON must be an object")
+        check_routing(ROUTING_MANIFEST, data.get('routing_schema'))
         selected, row = _decision(data)
         _write_decision_log(row)
         logger.info(
