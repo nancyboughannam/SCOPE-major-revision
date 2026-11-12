@@ -66,6 +66,12 @@ public class VehicularEdgeOrchestrator extends EdgeOrchestrator {
     private static final String SCOPE_POLICY = "SCOPE";
     private static final String SOFTCOST_OPT_POLICY = "SOFTCOST_OPT";
     private static final String PERFORMANCE_ONLY_POLICY = "PERFORMANCE_ONLY";
+    private static final String STATIC_POLICY = "SCOPE_STATIC";
+    private static final boolean DEADLINE_GUARD = Boolean.getBoolean("scope.deadlineTierGuard");
+    private static final String ROUTING_SCHEMA = DEADLINE_GUARD
+            ? "deadline_guard_v1" : "edge_first_v1";
+    private final long[] deadlineGuardRsu = new long[3];
+    private final long[] deadlineGuardGsm = new long[3];
 
 
     private static final String SCOPE_DATA_COLLECTION_POLICY = "SCOPE_DATA_COLLECTION";
@@ -156,6 +162,12 @@ public class VehicularEdgeOrchestrator extends EdgeOrchestrator {
 
     private void writeEdgeVmSelectionAudit() {
         if (!(policy.equals("RAIDER_TRAX") || usesRtOptLogic())) return;
+        if (usesRtOptLogic()) {
+            for (int type=0; type<NUM_APP_TYPES; type++)
+                SimLogger.printLine("DEADLINE_TIER_AUDIT policy=" + policy + " type=" + type
+                        + " routing_schema=" + ROUTING_SCHEMA + " rsu=" + deadlineGuardRsu[type]
+                        + " gsm=" + deadlineGuardGsm[type]);
+        }
         String folder = SimLogger.getInstance().getOutputFolder();
         SimLogger.printLine("EDGE_VM_SELECTION policy=" + policy + " plans=" + edgePlans
                 + " retained=" + retainedEdgePlans + " reselected=" + reselectedEdgePlans
@@ -292,6 +304,20 @@ public class VehicularEdgeOrchestrator extends EdgeOrchestrator {
         thresholdPerType[2] = 90.0;
 
         this.currentAlpha = 0.6;
+        if (policy.equals(STATIC_POLICY)) {
+            String config = System.getProperty("scope.staticConfig");
+            if (config == null) throw new IllegalArgumentException("SCOPE_STATIC requires scope.staticConfig");
+            try {
+                OptimizerReply fixed = OptimizerReply.parse(java.nio.file.Files.readString(
+                        java.nio.file.Path.of(config)));
+                currentAlpha = fixed.alpha;
+                for (int i=0; i<NUM_APP_TYPES; i++) {
+                    wLoadPerType[i] = fixed.weights[i]; wDistPerType[i] = 1-fixed.weights[i];
+                    thresholdPerType[i] = fixed.thresholds[i];
+                }
+                SimLogger.printLine("STATIC_CONFIGURATION " + config);
+            } catch (IOException e) { throw new IllegalArgumentException("Cannot read static configuration", e); }
+        }
 
         long simulationSeed = Long.parseLong(
                 System.getProperty("scope.simSeed", "20260828")
@@ -317,7 +343,7 @@ public class VehicularEdgeOrchestrator extends EdgeOrchestrator {
         int result = 0;
 
         int type = task.getTaskType();
-        if (usesRtOptLogic() && type >= 0 && type < NUM_APP_TYPES) {
+        if (tracksWindows() && type >= 0 && type < NUM_APP_TYPES) {
             tasksPerType[type]++;
         }
 
@@ -376,7 +402,26 @@ public class VehicularEdgeOrchestrator extends EdgeOrchestrator {
             // 1. Try Edge
             EdgeVM bestEdgeVm = selectEdgeVm(task, null);
 
-            if (bestEdgeVm != null) {
+            int guardRoute = DeadlineTierGuard.KEEP_EDGE;
+            if (DEADLINE_GUARD && usesRtOptLogic() && bestEdgeVm != null) {
+                guardRoute = DeadlineTierGuard.choose(task.getCloudletLength(), bestEdgeVm.getMips(),
+                        SimSettings.getInstance().getMipsForCloudVM(), getDeadlineForType(type),
+                        wlanUploadDelay, wlanDownloadDelay, wanUploadDelay, wanDownloadDelay,
+                        gsmUploadDelay, gsmDownloadDelay, currentAlpha, 0.0);
+                if (guardRoute != DeadlineTierGuard.KEEP_EDGE)
+                    guardRoute = DeadlineTierGuard.choose(task.getCloudletLength(), bestEdgeVm.getMips(),
+                            SimSettings.getInstance().getMipsForCloudVM(), getDeadlineForType(type),
+                            wlanUploadDelay, wlanDownloadDelay, wanUploadDelay, wanDownloadDelay,
+                            gsmUploadDelay, gsmDownloadDelay, currentAlpha, simulationRandom.nextDouble());
+            }
+
+            if (guardRoute != DeadlineTierGuard.KEEP_EDGE) {
+                result = guardRoute == DeadlineTierGuard.RSU ? CLOUD_DATACENTER_VIA_RSU : CLOUD_DATACENTER_VIA_GSM;
+                if (CloudSim.clock() >= SimSettings.getInstance().getWarmUpPeriod()) {
+                    if (guardRoute == DeadlineTierGuard.RSU) deadlineGuardRsu[type]++;
+                    else deadlineGuardGsm[type]++;
+                }
+            } else if (bestEdgeVm != null) {
                 plannedEdgeVms.put(edgeTaskKey(task), bestEdgeVm);
                 edgePlans++;
                 result = EDGE_DATACENTER;
@@ -738,6 +783,7 @@ public class VehicularEdgeOrchestrator extends EdgeOrchestrator {
 
     @Override
     public void startEntity() {
+        if (usesRtOptLogic()) SimLogger.printLine("ROUTING_SCHEMA=" + ROUTING_SCHEMA);
         // Schedule periodic statistics window updates for predictive policy
         if (policy.equals("PREDICTIVE")) {
             schedule(getId(), SimSettings.CLIENT_ACTIVITY_START_TIME
@@ -746,8 +792,9 @@ public class VehicularEdgeOrchestrator extends EdgeOrchestrator {
         }
 
         // Start Optimizer Loop for Dynamic Policies
-        if (usesRtOptLogic()) {
-            SimLogger.printLine(policy + ": Starting Optimizer Loop. Delta T = " + DELTA_T);
+        if (tracksWindows()) {
+            SimLogger.printLine(policy + ": Starting " + ((policy.equals(STATIC_POLICY) || !usesRtOptLogic())
+                    ? "Reporting" : "Optimizer") + " Loop. Delta T = " + DELTA_T);
             if (isTrainingDataActive()) {
                 SimLogger.printLine("Candidate training-data output: " + TRAINING_DATA_PATH
                         + " | exploration=" + isCandidateExplorationActive()
@@ -786,7 +833,7 @@ public class VehicularEdgeOrchestrator extends EdgeOrchestrator {
                 break;
             }
             case UPDATE_OPTIMIZER: {
-                if (usesRtOptLogic()) {
+                if (tracksWindows()) {
                     runOptimizer();                 
                     schedule(getId(), DELTA_T, UPDATE_OPTIMIZER);
                 }
@@ -826,7 +873,7 @@ public class VehicularEdgeOrchestrator extends EdgeOrchestrator {
         if (policy.equals("MAB")) {
             MAB.updateUCB(task, serviceTime);
         }
-        if (usesRtOptLogic()) {
+        if (tracksWindows()) {
             int type = task.getTaskType();
             if (type >= 0 && type < NUM_APP_TYPES) {
                 completedPerType[type]++;
@@ -861,7 +908,7 @@ public class VehicularEdgeOrchestrator extends EdgeOrchestrator {
             MAB.updateUCB(task, 0);
         }
 
-        if (usesRtOptLogic()) {
+        if (tracksWindows()) {
             int type = task.getTaskType();
             if (type >= 0 && type < NUM_APP_TYPES) {
                 failuresPerType[type]++;
@@ -937,8 +984,12 @@ public class VehicularEdgeOrchestrator extends EdgeOrchestrator {
         }
     }
 
+    private boolean tracksWindows() {
+        return usesRtOptLogic() || (policy.equals("AI_BASED") && Boolean.getBoolean("scope.logPerformanceWindows"));
+    }
+
     private boolean usesRtOptLogic() {
-        return policy.equals("RT_OPT")
+        return policy.equals(STATIC_POLICY) || policy.equals("RT_OPT")
                 || policy.equals("RT_OPT_ML")
                 || policy.equals(EXP3_MC_POLICY)
                 || policy.equals(SCOPE_DATA_COLLECTION_POLICY)
@@ -1081,24 +1132,17 @@ public class VehicularEdgeOrchestrator extends EdgeOrchestrator {
     }
 
     private double[] getCurrentServerLoads() {
-        List<Datacenter> datacenters = SimManager.getInstance()
-                .getEdgeServerManager().getDatacenterList();
-        double[] loads = new double[datacenters.size()];
-        for (int i = 0; i < datacenters.size(); i++) {
-            Datacenter datacenter = datacenters.get(i);
-            double load = 0.0;
-            if (!datacenter.getHostList().isEmpty()) {
-                EdgeHost host = (EdgeHost) datacenter.getHostList().get(0);
-                if (!host.getVmList().isEmpty()) {
-                    EdgeVM vm = (EdgeVM) host.getVmList().get(0);
-                    double totalUtilization = vm.getCloudletScheduler()
-                            .getTotalUtilizationOfCpu(CloudSim.clock());
-                    if (vm.getNumberOfPes() > 0) {
-                        load = (totalUtilization / vm.getNumberOfPes()) * 100.0;
-                    }
-                }
-            }
-            loads[i] = clamp(load, 0.0, 100.0);
+        if (!edgeInventoryReady) initializeEdgeVmInventory();
+        return edgeVmLoads(availableEdgeVms, CloudSim.clock());
+    }
+
+    static double[] edgeVmLoads(List<EdgeVM> vms, double time) {
+        double[] loads = new double[vms.size()];
+        for (int i = 0; i < vms.size(); i++) {
+            // Scheduler totals are percentages already, independent of PE count.
+            loads[i] = edgeVmLoadPercent(vms.get(i), time);
+            if (!Double.isFinite(loads[i]) || loads[i] < 0)
+                throw new IllegalStateException("Invalid edge CPU telemetry");
         }
         return loads;
     }
@@ -1184,12 +1228,8 @@ public class VehicularEdgeOrchestrator extends EdgeOrchestrator {
 
     private double configurationDistance(CandidateConfiguration first,
             CandidateConfiguration second) {
-        double distance = Math.abs(first.alpha - second.alpha);
-        for (int i = 0; i < NUM_APP_TYPES; i++) {
-            distance += Math.abs(first.wLoad[i] - second.wLoad[i]);
-            distance += Math.abs(first.threshold[i] - second.threshold[i]) / 100.0;
-        }
-        return distance;
+        return OptimizerReply.distance(first.alpha, first.wLoad, first.threshold,
+                second.alpha, second.wLoad, second.threshold);
     }
 
     private void updatePreviousConfiguration() {
@@ -1257,7 +1297,7 @@ public class VehicularEdgeOrchestrator extends EdgeOrchestrator {
 
     private String trainingCsvHeader() {
         StringBuilder header = new StringBuilder();
-        header.append("run_id,policy,num_devices,window_id,window_start,window_end,app_id");
+        header.append("run_id,policy,num_devices,window_id,window_start,window_end,app_id,routing_schema");
         for (int i = 0; i < NUM_APP_TYPES; i++) {
             header.append(",state_total_").append(i);
         }
@@ -1331,6 +1371,7 @@ public class VehicularEdgeOrchestrator extends EdgeOrchestrator {
         appendCsv(row, trainingWindow.startTime);
         appendCsv(row, trainingWindow.endTime);
         appendCsv(row, appId);
+        appendCsv(row, csvString(ROUTING_SCHEMA));
         for (int value : state.total) {
             appendCsv(row, value);
         }
@@ -1415,6 +1456,11 @@ public class VehicularEdgeOrchestrator extends EdgeOrchestrator {
         flushTrainingWindows(false);
 
         final OptimizerStateSnapshot inputState = captureOptimizerState(timestamp);
+        if (Boolean.getBoolean("scope.logPerformanceWindows")) logPerformanceWindow(inputState);
+        if (policy.equals(STATIC_POLICY) || !usesRtOptLogic()) {
+            resetOptimizerWindowCounters();
+            return;
+        }
         final long exp3Window = policy.equals(EXP3_MC_POLICY) ? exp3Feedback.closeWindow() : -1;
         final java.util.List<Long> exp3Ready = exp3Feedback.readyIds();
         // logPerformanceWindow(inputState);
@@ -1444,6 +1490,8 @@ public class VehicularEdgeOrchestrator extends EdgeOrchestrator {
 
                 StringBuilder json = new StringBuilder();
                 json.append("{");
+                json.append("\"telemetry_schema\":\"vm_percent_all_vms_v1\",");
+                json.append("\"routing_schema\":\"").append(ROUTING_SCHEMA).append("\",");
                 if (policy.equals(EXP3_MC_POLICY)) {
                     json.append("\"feedback_protocol\":\"admission_cohort_v1\",");
                     json.append("\"closed_window_id\":").append(exp3Window).append(",");
@@ -1516,6 +1564,8 @@ public class VehicularEdgeOrchestrator extends EdgeOrchestrator {
 
                 URL url = new URL(targetUrl);
                 HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+                connection.setConnectTimeout(5000);
+                connection.setReadTimeout(30000);
                 connection.setRequestMethod("POST");
                 connection.setRequestProperty("Content-Type", "application/json; utf-8");
                 connection.setDoOutput(true);
@@ -1534,24 +1584,12 @@ public class VehicularEdgeOrchestrator extends EdgeOrchestrator {
                     throw new IOException("Optimizer returned an empty response");
                 }
 
-                String response = responseLine.replace("{", "")
-                        .replace("}", "").replace("\"", "");
-                String[] sections = response.split("\\|");
-                for (String section : sections) {
-                    if (section.startsWith("ALPHA")) {
-                        currentAlpha = Double.parseDouble(section.split(":")[1]);
-                    } else if (section.contains(":")) {
-                        String[] parts = section.split(":");
-                        if (parts.length == 4) {
-                            int id = Integer.parseInt(parts[0]);
-                            if (id >= 0 && id < NUM_APP_TYPES) {
-                                wLoadPerType[id] = Double.parseDouble(parts[1]);
-                                wDistPerType[id] = Double.parseDouble(parts[2]);
-                                thresholdPerType[id] = Double.parseDouble(parts[3]);
-                            }
-                        }
-                    }
-                }
+                OptimizerReply reply = OptimizerReply.parse(responseLine);
+                CandidateConfiguration validated = new CandidateConfiguration();
+                validated.alpha = reply.alpha;
+                System.arraycopy(reply.weights, 0, validated.wLoad, 0, NUM_APP_TYPES);
+                System.arraycopy(reply.thresholds, 0, validated.threshold, 0, NUM_APP_TYPES);
+                applyCandidateConfiguration(validated);
 
                 if (policy.equals(EXP3_MC_POLICY)) exp3Feedback.acknowledge(exp3Ready);
                 CandidateConfiguration afterUpdate = captureCurrentConfiguration();
@@ -1565,6 +1603,10 @@ public class VehicularEdgeOrchestrator extends EdgeOrchestrator {
 
         } catch (Exception e) {
             SimLogger.printLine(policy + " Error: " + e.getMessage());
+            // Enable in research runs so a failed service cannot masquerade as
+            // a successful adaptive policy that happened to keep its settings.
+            if (Boolean.getBoolean("scope.optimizer.failFast"))
+                throw new IllegalStateException("Optimizer failed for " + policy, e);
         } finally {
             startTrainingWindow(timestamp, inputState);
             resetOptimizerWindowCounters();

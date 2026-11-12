@@ -49,6 +49,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from flask import Flask, jsonify, request
+import json
+from scope_objective import LEGACY_SUPPORT, load_support, check_routing, LEGACY_ROUTING
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -94,11 +96,15 @@ CANDIDATE_COLUMNS = [
     "candidate_threshold_2",
 ]
 
-# Same training-only normalization support used by SCOPE.
-TRAIN_FAILURE_MIN = 0.0
-TRAIN_FAILURE_MAX = 0.7353648757016841
-TRAIN_DNST_MIN = 0.5327461065548065
-TRAIN_DNST_MAX = 1.6538610651089858
+# Point this to the same model manifest used by SCOPE for revised experiments.
+NORMALIZATION_MANIFEST = os.getenv('EXP3_MC_NORMALIZATION_MANIFEST')
+ROUTING_MANIFEST = json.loads(Path(NORMALIZATION_MANIFEST).read_text()) if NORMALIZATION_MANIFEST else {}
+NORMALIZATION, NORMALIZATION_SOURCE = (load_support(NORMALIZATION_MANIFEST)
+    if NORMALIZATION_MANIFEST else (dict(LEGACY_SUPPORT), 'legacy_reference'))
+TRAIN_FAILURE_MIN = NORMALIZATION['failure_min']
+TRAIN_FAILURE_MAX = NORMALIZATION['failure_max']
+TRAIN_DNST_MIN = NORMALIZATION['dnst_min']
+TRAIN_DNST_MAX = NORMALIZATION['dnst_max']
 
 ALPHA_MIN, ALPHA_MAX = 0.05, 0.95
 W_LOAD_MIN, W_LOAD_MAX = 0.10, 0.90
@@ -111,6 +117,8 @@ logging.basicConfig(
     format="%(asctime)s - [EXP3-MC-ADAPTED] %(message)s",
 )
 logger = logging.getLogger(__name__)
+if NORMALIZATION_SOURCE == 'legacy_reference':
+    logger.warning('Using legacy normalization; set EXP3_MC_NORMALIZATION_MANIFEST for revised models.')
 app = Flask(__name__)
 state_lock = threading.Lock()
 decision_log_lock = threading.Lock()
@@ -589,6 +597,9 @@ def health():
         {
             "status": "ok",
             "baseline": "EXP3-MC-adapted",
+            "normalization": NORMALIZATION,
+            "normalization_source": NORMALIZATION_SOURCE,
+            "routing_schema": ROUTING_MANIFEST.get('routing_schema', LEGACY_ROUTING),
             "candidate_count": len(CANDIDATE_CATALOGUE),
             "arm_count": ARM_COUNT,
             "arm_selection_seed": ARM_SELECTION_SEED,
@@ -613,6 +624,7 @@ def optimize():
         data = request.get_json(force=True)
         if not isinstance(data, dict):
             raise ValueError("Request JSON must be an object")
+        check_routing(ROUTING_MANIFEST, data.get('routing_schema'))
         selected, row = _decision(data)
         _write_decision_log(row)
         logger.info(

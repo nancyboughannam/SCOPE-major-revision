@@ -39,6 +39,7 @@ import numpy as np
 import pandas as pd
 import xgboost as xgb
 from flask import Flask, jsonify, request
+from scope_objective import manifest_support, check_telemetry, check_routing, LEGACY_ROUTING
 
 
 APP_COUNT = 3
@@ -82,13 +83,6 @@ HARD_STABILITY_ENABLED = (
 R_MAX = float(os.getenv("SCOPE_R_MAX", "0.20"))
 
 
-
-# Training-set target support. These constants normalize both performance
-# targets to approximately [0, 1] without using validation/test information.
-TRAIN_FAILURE_MIN = 0.0
-TRAIN_FAILURE_MAX = 0.7353648757016841
-TRAIN_DNST_MIN = 0.5327461065548065
-TRAIN_DNST_MAX = 1.6538610651089858
 
 # Feasible configuration support used during candidate-data collection.
 ALPHA_MIN, ALPHA_MAX = 0.05, 0.95
@@ -271,6 +265,13 @@ def _load_candidate_catalogue() -> pd.DataFrame:
 
 _validate_objective_configuration()
 MANIFEST = _load_manifest()
+NORMALIZATION, NORMALIZATION_SOURCE = manifest_support(MANIFEST)
+TRAIN_FAILURE_MIN = NORMALIZATION['failure_min']
+TRAIN_FAILURE_MAX = NORMALIZATION['failure_max']
+TRAIN_DNST_MIN = NORMALIZATION['dnst_min']
+TRAIN_DNST_MAX = NORMALIZATION['dnst_max']
+if NORMALIZATION_SOURCE == 'legacy_reference':
+    logger.warning('Manifest has no normalization; using legacy support for reproduction only.')
 MODELS = _load_models(MANIFEST)
 CANDIDATE_CATALOGUE = _load_candidate_catalogue()
 logger.info(
@@ -706,6 +707,10 @@ def health():
         {
             "status": "ready",
             "models_loaded": len(MODELS),
+            "normalization": NORMALIZATION,
+            "normalization_source": NORMALIZATION_SOURCE,
+            "telemetry_schema": MANIFEST.get('telemetry_schema', 'legacy_first_vm_v1'),
+            "routing_schema": MANIFEST.get('routing_schema', LEGACY_ROUTING),
             "candidate_count": len(CANDIDATE_CATALOGUE),
             "lambda": LAMBDA,
             "w_failure": W_FAILURE,
@@ -731,6 +736,8 @@ def optimize():
         data = request.get_json(force=True)
         if not isinstance(data, dict):
             raise ValueError("Request body must be a JSON object")
+        check_telemetry(MANIFEST, data.get('telemetry_schema'))
+        check_routing(MANIFEST, data.get('routing_schema'))
 
         settings = _resolve_objective_settings(data)
         optimizer_start = time.perf_counter()
