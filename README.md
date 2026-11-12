@@ -1,205 +1,133 @@
-# EXP3_MC feedback audit — diagnostic package v1
+# SCOPE — reproducible simulation study
 
-## Install and verify first
+SCOPE selects seven configuration parameters using learned performance predictors,
+a soft penalty on parameter movement, and a hard bound on each configuration step.
+The simulator is the modified EdgeCloudSim vehicular application in `ThreeBrains/`.
+Python services communicate with Java over localhost HTTP. MATLAB generates figures.
 
-Copy the entire `exp3_feedback_audit` folder from the package's `FLaskAPIs`
-folder into:
+This branch is the **clean publication candidate**. It contains the same Java,
+optimizer services and training code as the v5 study, plus the isolated EXP3 routing
+ablation. It does not certify a performance ranking or that every reviewer comment
+has been resolved. Final outcome tables must be archived after the rerun is checked.
 
-`~/Documents/SCOPE-major-revision/FLaskAPIs/`
+## Existing completed v5 study
 
-This adds three Python files. It does not replace `exp3_mc_service.py`,
-`ml_optimizer_service.py`, `run_shared.py`, Java files, or past results.
-If the destination already exists, stop and compare it instead of overwriting.
+To rerun only EXP3 with its deadline guard disabled, follow
+[RUN_EXP3_GUARD_ABLATION.md](RUN_EXP3_GUARD_ABLATION.md).
+That adds 50 simulations and reuses the 350 unaffected observations with provenance.
+Do not change a running checkout to this cleanup branch. Use a separate checkout.
 
-Stop the existing EXP3 service before launching another service on port 5003.
-From Terminal:
+## Reproduce from a fresh checkout
+
+Supported workflow: macOS or Linux, Python 3.11/3.12, JDK 21+, and MATLAB R2020a+
+for figure export. Java and Python run headlessly; NetBeans is not required.
+The runners use POSIX process groups and file locks; native Windows is not supported.
 
 ```bash
-cd ~/Documents/SCOPE-major-revision/FLaskAPIs
-./.venv-revision/bin/python exp3_feedback_audit/test_audit.py
+python3.11 -m venv .venv
+.venv/bin/python -m pip install -r FLaskAPIs/requirements.txt
+java -version
+.venv/bin/python -c "import flask,numpy,pandas,xgboost,sklearn,scipy,matplotlib; print('Dependencies OK')"
 ```
 
-Expected: 13 tests, OK. These use synthetic data in temporary folders; they do
-not run EdgeCloudSim or change any experiment output.
+Use a JDK, not a Java runtime alone. The launcher checks for a compiler. If needed,
+pass `--java /absolute/path/to/bin/java` during preparation. Keep the same Python
+environment, inputs and source code through all stages; resume checks reject changes.
 
-Verify the preserved full catalogue without starting a server:
+Run these stages **in order from the repository root**. Each command must succeed
+before starting the next. The first three regenerate the training observations and
+models. Existing models/results in other directories are not overwritten.
 
 ```bash
-./.venv-revision/bin/python exp3_feedback_audit/run_audit.py --catalogue-experiment revision_results/shared_full_ablation01 --output revision_results/exp3_full_fixed_audit01 --mode fixed --check-only
+.venv/bin/python FLaskAPIs/run_deadline_pilot.py prepare
+.venv/bin/python FLaskAPIs/run_deadline_pilot.py collect
+.venv/bin/python FLaskAPIs/run_deadline_pilot.py train
+.venv/bin/python FLaskAPIs/run_confirmatory_study.py prepare
+.venv/bin/python FLaskAPIs/run_confirmatory_study.py run
+.venv/bin/python FLaskAPIs/run_exp3_guard_ablation.py prepare
+.venv/bin/python FLaskAPIs/run_exp3_guard_ablation.py run
 ```
 
-Expected: 2537 shared arms, original order, fixed, effective eta=0.1.
-If the source experiment is not found or its checksum/order differs, stop and
-share the error. Do not rebuild or silently substitute a different catalogue.
+The first prepare uses the full collection profile named `pilot`: 10 development
+iterations at five loads. `--profile smoke` is only a workflow test, never final data.
+The confirmatory preparation requires the models to pass their recorded readiness
+checks. Do not use a diagnostic override for publication data. Static calibration
+is performed automatically on separate seeds before confirmation begins.
 
-## Why a separate implementation?
+The runners start/stop Flask as needed and provide all Java arguments. Leave ports
+5002 and 5003 free and do not launch services manually. On a Mac, `caffeinate -i`
+may prefix a long-running Python command. Keep the Mac powered with its lid open.
+Ctrl+C terminates only the runner's own children; repeat the interrupted stage to
+resume. Completed attempts are checked and skipped. Preserve partial attempts.
 
-The original script remains the historical reference. The new service corrects
-feedback bookkeeping and records the distinction explicitly:
+The dependency versions are pinned to the recorded v5 environment. Rebuilding on
+another platform is a replication, not a promise of byte-identical trained models
+or wall-clock timings. Every run records its inputs, versions, model hashes and logs.
+The supplied AI-based Weka models are kept unchanged; SCOPE models are generated
+from the training workflow rather than confused with the obsolete models in history.
 
-| Previous action was | Denominator for its observed feedback |
+## What is run
+
+| Study component | Loads | Policies | Evaluation cases |
+|---|---|---|---:|
+| Main | 600, 900, 1200, 1500, 1800 | SCOPE, AI-based, EXP3-MC-adapted, RAIDER/TRAX, RANDOM, calibrated static | 300 |
+| SCOPE ablations | 1800 | Hard only, soft only, performance only | 30 |
+| Load increase/recovery | 1200 | SCOPE, frozen SCOPE, static, three ablations, AI-based | 70 |
+| EXP3 routing ablation | All five loads | EXP3 guard off, paired with the existing guard-on cases | 50 new |
+
+Each final scenario lasts 60 simulated minutes with three minutes of warm-up.
+Final iterations are 3401–3410. SCOPE uses lambda **0.01**, step bound **0.15**,
+and a 60-second controller period. Lambda is a frozen development choice, not an
+optimum selected from these final results. EXP3 uses the full training catalogue,
+QoS 0.20 and its existing `0.1 * min(1, 5/K)` learning-rate rule.
+
+`run_confirmatory_study.py` reproduces the guard-on experiment. The subsequent
+EXP3 ablation disables only EXP3's routing guard, retains both variants, and
+recalculates the main comparison family. It does not retrain models or alter any
+other policy. See [the protocol](reproducibility/PROTOCOL.md) for information access,
+calibration, inference and limitations. This is an adapted EXP3 baseline, not a
+claim of exact reproduction of the original authors' implementation.
+
+## Figures
+
+After all 50 guard-off cases finish, use the **MATLAB Command Window**:
+
+```matlab
+cd('ThreeBrains/sim_results/v5_exp3_guard_off_3401_3410/matlab')
+plot_scope_paper_results
+```
+
+The working directory before `cd` should be the repository root, or use an absolute
+path. Main curves retain the original 11 x 11 cm format, Times New Roman, colours,
+markers and line widths. Static controls, SCOPE ablations, adaptation and EXP3
+routing comparisons have separate folders. RANDOM and all registered comparators
+remain in supplementary figures/statistical families. See
+[FIGURE_GUIDE.md](FLaskAPIs/paper_matlab/FIGURE_GUIDE.md).
+
+## Verification and layout
+
+```bash
+python3 reproducibility/verify_files.py
+.venv/bin/python -m unittest discover -s FLaskAPIs -p 'test_*.py'
+```
+
+| Path | Purpose |
 |---|---|
-| Fixed initial configuration | 1 |
-| Randomly sampled arm | Probability used for that specific draw |
-| Deterministically retained arm after no trigger | 1 |
-| Randomly sampled arm happened to equal current arm | Its draw probability, NOT 1 |
-| Java reports an unexpected arm | Reject with an error; do not silently attribute feedback |
+| `ThreeBrains/src`, `ThreeBrains/lib` | Frozen Java source and required libraries |
+| `ThreeBrains/scripts/sample_app5/config/weka` | Six unchanged AI-based model files |
+| `FLaskAPIs/deadline_pilot` | Simulation properties, XML and development plotting input |
+| `FLaskAPIs/*.py` | Active services, training, resumable runners and tests |
+| `FLaskAPIs/paper_matlab` | Publication plots with separate controls/ablations |
+| `reproducibility` | Protocol, provenance, exact file hashes and verification |
+| `ThreeBrains/sim_results` (generated, ignored) | Training data, models, attempts and reports |
 
-The update remains score += effective_eta * reward / recorded_probability.
-An initial observation is credited once at weight 1 rather than multiplied by K.
-Retained-action windows provide no observations of other arms; do NOT claim
-full-vector unbiasedness or an adversarial regret guarantee for this reactive
-adaptation. This is a declared adapted algorithm, not a verified reproduction
-of the original authors' implementation.
+Validation details are in [reproducibility/VALIDATION.md](reproducibility/VALIDATION.md).
 
-The normalization, reward, QoS trigger, candidate selection, response format,
-port 5003 and Java policy name EXP3_MC are unchanged. No exploration mixture is
-added. Fixed eta can still cause concentration after a genuinely random draw.
-The new fields expose that behavior instead of hiding it.
+Historical results, obsolete models and diagnostic launchers remain accessible at
+commit `709bbf19b466c8e3a0b90e3f6ec1ea5cb10e13de` and the historical branches. This
+cleanup does not rewrite Git history or delete Nancy's saved experiment directories.
+Use a shallow single-branch clone for the small publication checkout; a full clone
+still downloads historical objects. See `reproducibility/CLEANUP.md`.
 
-## Two explicitly named modes
-
-1. `fixed`: effective_eta = eta_reference (default 0.1).
-2. `scaled_k5`: effective_eta = eta_reference * 5 / actual_number_of_arms.
-
-The scaling mode is a diagnostic sensitivity rule, not a formula taken from the
-paper and not a guaranteed optimal learning rate. It preserves the K=5 reference
-scale. For reference eta=0.1:
-
-| K | Fixed eta | Scaled eta |
-|---:|---:|---:|
-| 5 | 0.1 | 0.1 |
-| 25 | 0.1 | 0.02 |
-| 100 | 0.1 | 0.005 |
-| 2537 | 0.1 | approximately 0.000197083 |
-
-The runner explicitly sets eta and mode; the old shared launcher would override
-eta and load the old service, so do not use run_shared.py for these new modes.
-Each new output folder records the mode, reference/effective eta, source hashes,
-health information and a copy of the exact catalogue. Existing output folders
-are refused. `--check-only` creates no results.
-
-## Next two diagnostic simulations, after the tests pass
-
-Run ONLY EXP3_MC. Do not repeat SCOPE or its ablations.
-Make a COPY of ThreeBrains/scripts/sample_app5/config/shared_catalogue_pilot.properties
-named `exp3_feedback_audit.properties`, and set these existing properties:
-
-```properties
-simulation_time=60
-warm_up_period=3
-min_number_of_mobile_devices=1800
-max_number_of_mobile_devices=1800
-mobile_device_counter_size=100
-orchestrator_policies=EXP3_MC
-```
-
-Leave all other simulation settings unchanged. Both initial checks use iteration
-1 / seed 20260829 solely as diagnostics. They are NOT held-out final evaluation.
-
-### Diagnostic A: corrected bookkeeping, fixed eta
-
-```bash
-cd ~/Documents/SCOPE-major-revision/FLaskAPIs
-./.venv-revision/bin/python exp3_feedback_audit/run_audit.py --catalogue-experiment revision_results/shared_full_ablation01 --output revision_results/exp3_full_fixed_audit01 --mode fixed
-```
-
-Leave this terminal running. SCOPE's Python service is unnecessary for an
-EXP3-only run. In NetBeans use the usual main class
-`edu.boun.edgecloudsim.applications.sample_app5.VehicularMainApp`.
-Working directory: `/Users/nancyboughannam/Documents/SCOPE-major-revision`.
-Arguments (one line):
-
-```text
-ThreeBrains/scripts/sample_app5/config/exp3_feedback_audit.properties ThreeBrains/scripts/sample_app5/config/edge_devices.xml ThreeBrains/scripts/sample_app5/config/applications.xml ThreeBrains/revision_results/exp3_full_fixed_audit01/ite1 1
-```
-
-Wait for BUILD SUCCESSFUL, save/copy the Output text, then stop the Python service
-with Ctrl+C. Capture any optimizer error even if Java reports BUILD SUCCESSFUL;
-Java may continue after an HTTP error. Do not interpret that as a valid run.
-
-### Diagnostic B: corrected bookkeeping, scaled eta
-
-```bash
-./.venv-revision/bin/python exp3_feedback_audit/run_audit.py --catalogue-experiment revision_results/shared_full_ablation01 --output revision_results/exp3_full_scaled_audit01 --mode scaled_k5
-```
-
-NetBeans arguments (same seed/configuration, different output directory):
-
-```text
-ThreeBrains/scripts/sample_app5/config/exp3_feedback_audit.properties ThreeBrains/scripts/sample_app5/config/edge_devices.xml ThreeBrains/scripts/sample_app5/config/applications.xml ThreeBrains/revision_results/exp3_full_scaled_audit01/ite1 1
-```
-
-Save the Output text again. Upload Python and Java result folders for both modes.
-Do not choose a final learning rate from whichever wins this single diagnostic.
-
-## What to inspect in new logs
-
-- First feedback_origin=initial_fixed and feedback_probability=1.
-- Later sampled feedback_probability equals the preceding row's
-  next_behavior_probability. For retained feedback it equals 1.
-- mode, eta_reference and eta identify the variant without relying on a folder name.
-- max_selection_probability, selection_entropy and effective_arm_count diagnose
-  concentration (effective_arm_count here is exp(entropy), not catalogue size).
-- Reward, score_increment, selected arm, triggering, switching and churn remain logged.
-- Compare realized Java failures/service time, not predictions alone.
-- Equal catalogue membership does not equalize information: SCOPE has pretrained
-  predictors whereas this baseline receives only observed-arm feedback.
-- 59 windows cannot explore 2537 arms comprehensively. Report that limitation.
-
-## Separate tuning plan (after the two diagnostics are reviewed)
-
-Predeclare a small grid: reference eta in {0.05, 0.1, 0.2}, mode in
-{fixed, scaled_k5}; QoS threshold remains 0.20 for this isolated study.
-Use separate development runs, for example iterations 1001–1003 if unused
-(verify the printed SIMULATION_SEED; the inspected Java convention is
-20260828 + iteration). Use loads 900 and 1800, the same catalogue and paired
-seeds for each setting. Record the same tuning budget for every K being studied.
-
-Choose based on a predeclared realized performance objective matching the
-failure/deadline-normalized service cost, using the SAME normalization and
-application weights; raw service time alone is not that objective. Retain both
-component metrics and churn. Inspect whether the existing statistics scripts
-already calculate that objective before adding a new aggregator.
-
-Freeze settings before the final 100–1800 sweep. Reserve evaluation seeds not
-used to select parameters, report uncertainty, and document that the original
-eta=0.1 reference and the revised adaptation are different experiments.
-Neither the grid nor scaled_k5 is an assertion that the baseline must beat SCOPE.
-
-## Provenance of the completed full-catalogue diagnostic
-
-Received Python archive: shared_full_ablation01.zip
-SHA256: 9b1045efd39485a814a5f15c98a64f90eee53f81d55edddc7cfcea91bb89a918
-Received Java archive: shared_k25_ablation01(2).zip
-SHA256: 3854e4c521fce227b33bd03321a10d949b12fa5e8b1d2ceef8d2ca9f772f30f5
-Catalogue SHA256: 39ee000d61f300aaad81e7c24c4cc17a83687133e3ef877736a9f5ab55fb0ff3
-
-The Java archive's internal directory retains the old k25 name. The supplied
-console run (06 November 2026, 08:52:53–08:55:31) matches all four Java result
-counts, service times and finish times. Python log timestamps and behavior align.
-This is strong evidence of the matching full-catalogue experiment. The console
-excerpt does not print the literal output path; do not claim that pathname was
-independently confirmed. Preserve the original archive and record the naming
-mistake instead of overwriting it. No repeat is necessary solely for its name.
-
-Original EXP3 source SHA256, verified against the run manifest:
-f803275240b44f24d5338d02d800706d5e297ce3211fafe71e34431bd1f071ed
-
-## Validation and limitations
-
-13 synthetic unit/integration tests pass locally: startup, saved probabilities,
-retention, random same-arm draws, unexpected application, state reset/isolation,
-actual-K scaling, configuration validation, Flask API/logging, negative fixed-eta
-control, scaled example and runner checksum/reuse checks.
-No new EdgeCloudSim experiment has been executed by the assistant. Local tests
-verify implementation behavior, not comparative performance or paper fidelity.
-
-Paper audited: Donassolo et al., Online Reconfiguration of IoT Applications in
-the Fog: The Information-Coordination Trade-Off, TPDS 33(5), 2022.
-https://polaris.imag.fr/panayotis.mertikopoulos/files/FogIoT.pdf
-DOI: 10.1109/TPDS.2021.3097281
-
-The paper supports a five-host experiment, eta=.1, softmax importance updates,
-and a reactive trigger. The deterministic initialization/retention semantics
-here are our explicit adaptation; full fidelity to author code is not verified.
+Existing license files are retained: [LICENSE](LICENSE), [ThreeBrains/LICENSE](ThreeBrains/LICENSE)
+and [NOTICE.md](NOTICE.md). Bundled dependencies retain their own license notices.

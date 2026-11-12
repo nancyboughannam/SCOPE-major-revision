@@ -1,63 +1,26 @@
-# macOS
-.DS_Store
-.AppleDouble
-.LSOverride
-
-# Python
-__pycache__/
-*.py[cod]
-*.egg-info/
-.venv/
-venv/
-.pytest_cache/
-
-# Java / IDE
-*.class
-.idea/
-*.iml
-.vscode/
-
-# OS / editor cruft
-*.swp
-*~
-
-# Local scratch output (does not affect the checked-in result artifacts
-# under ablation_results_final/, scope_candidate_dataset/, catalogue_runs/,
-# lambda_table_output/, rmax_test/, lambda_test/, which are the evidence
-# behind the paper's tables and are intentionally tracked)
-/FLaskAPIs/scope_ablation_results/
-/ThreeBrains/nbproject/private/
-/JavaApplication62/nbproject/private/
-/JavaApplication62/build/
-
-# Local environments and generated files
+# Local environments, IDE state and operating-system metadata
 .venv*/
 venv/
 __pycache__/
-*.pyc
-*.class
-.DS_Store
+*.py[cod]
+.pytest_cache/
 .idea/
+.vscode/
+.DS_Store
 nbproject/private/
-build/
-dist/
-*.log
-*.zip
-
-# Experiment outputs and backups
-/sim_results/
-/ThreeBrains/sim_results/
-/ThreeBrains/revision_results/
-/FLaskAPIs/revision_results/
-/FLaskAPIs/revision_smoke_results/
-/FLaskAPIs/exp3_mc_results/
-/revision_audit_backup_*/
-
-# Training data; keep the trained models
-/FLaskAPIs/revision_training_v3/scope_candidate_windows_raw*.csv
-/FLaskAPIs/revision_training_v3/dataset/
-
-# Local credentials; keep example configuration
 .env
 .env.*
 !.env.example
+
+# Generated builds and experiment output. Never use Git cleanup to delete evidence.
+*.class
+build/
+dist/
+/ThreeBrains/sim_results/
+/ThreeBrains/revision_results/
+/FLaskAPIs/revision_results/
+/FLaskAPIs/scope_ablation_results/
+/FLaskAPIs/exp3_mc_results/
+*.log
+*.zip
+figures_paper_*/
