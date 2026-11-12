@@ -35,6 +35,10 @@ APPS = ['ALL_APPS','TRAFFIC_MANAGEMENT','DANGER_ASSESSMENT','INFOTAINMENT']
 POLICIES = ['SCOPE','SCOPE_STATIC','PERFORMANCE_ONLY','AI_BASED']
 COLS = ['candidate_alpha']+[f'candidate_w_load_{i}' for i in range(3)]+[f'candidate_threshold_{i}' for i in range(3)]
 INITIAL = [.6,.5,.7,.4,85.,80.,90.]
+# The published v5 runner before the static-wire endpoint repair. Only this
+# exact version may retain its frozen study through repair-static-wire.
+STATIC_WIRE_BASE_SHA = 'e25a13e78028daac03eee690db0d34bcfb6a0c9f47c0999bef9d34199cc13b40'
+STATIC_WIRE_REPAIR = Path('repairs/static_wire_v1')
 STOP = False
 
 
@@ -132,6 +136,68 @@ def hashes(folder): return {str(p.relative_to(folder)):sha(p) for p in sorted(fo
 
 def verify(folder, expected):
     for p,h in expected.items(): require((folder/p).is_file() and sha(folder/p)==h,f'Changed or missing file: {folder/p}')
+
+
+def verify_runner(out,plan):
+    current=sha(__file__)
+    if current==plan['runner_sha']:return
+    record=out/STATIC_WIRE_REPAIR/'repair.json'
+    require(record.is_file(), 'Runner changed. For the published static-weight fix, run repair-static-wire first; otherwise prepare a new output.')
+    r=read(record)
+    require(r.get('repair')=='static_wire_v1' and
+            r.get('original_runner_sha')==plan['runner_sha']==STATIC_WIRE_BASE_SHA and
+            r.get('repaired_runner_sha')==current and
+            r.get('study_sha')==sha(out/'study.json'),
+            'Runner repair does not match this code and frozen study; do not edit its hashes')
+    verify(out,{str(STATIC_WIRE_REPAIR/'run_deadline_pilot.py'):current})
+    verify(out,r['preserved_hashes'])
+
+
+def repair_static_wire(out,plan):
+    """Register one serialization-only repair without rewriting study/checkpoints.
+
+    main() holds the study lock and checks the original location/environment.
+    The original frozen runner, Java, services, inputs and study checksum remain
+    intact. A separate record binds the repaired runner to this exact study.
+    """
+    verify(out,plan['input_hashes'])
+    if sha(__file__)==plan['runner_sha']:
+        print('No repair needed: this study already uses the current runner.',flush=True);return
+    folder=out/STATIC_WIRE_REPAIR
+    if (folder/'repair.json').exists():
+        verify_runner(out,plan)
+        print('Static-wire repair already registered. Run all to resume.',flush=True);return
+    require(plan['runner_sha']==STATIC_WIRE_BASE_SHA,
+            'This repair only supports the original published deadline-pilot runner')
+    original='runtime/services/run_deadline_pilot.py'
+    require(plan['input_hashes'].get(original)==STATIC_WIRE_BASE_SHA and
+            sha(out/original)==STATIC_WIRE_BASE_SHA,'Original frozen runner is missing or changed')
+    preserved=[out/'study.json',out/'study_checksum.txt']
+    jobs=sorted((out/'jobs').glob('*/complete.json'))
+    for p in jobs:
+        check_stop(out);complete(out,p.parent.name);preserved.append(p)
+    shortlist_file=out/'static_shortlist.json'
+    if shortlist_file.exists():
+        checksum=out/'static_shortlist_checksum.txt'
+        require(checksum.is_file() and checksum.read_text().strip()==sha(shortlist_file),
+                'Static shortlist changed after registration')
+        preserved.extend([shortlist_file,checksum])
+    check_stop(out)
+    folder.mkdir(parents=True,exist_ok=True)
+    snapshot=folder/'run_deadline_pilot.py'
+    if snapshot.exists():require(sha(snapshot)==sha(__file__),'Incomplete repair contains a different runner')
+    else:
+        # An interrupted copy is safe to repeat; the atomic record is the commit.
+        tmp=snapshot.with_suffix('.tmp');tmp.write_bytes(Path(__file__).read_bytes());tmp.replace(snapshot)
+    record=dict(repair='static_wire_v1',created=datetime.now(timezone.utc).isoformat(),
+        reason='Clamp floating-point complement of a valid static weight to its existing bounds; 1 - 0.9 must be accepted as 0.1.',
+        original_runner_sha=plan['runner_sha'],repaired_runner_sha=sha(snapshot),
+        study_sha=sha(out/'study.json'),completed_jobs_preserved=len(jobs),
+        preserved_hashes={str(p.relative_to(out)):sha(p) for p in preserved})
+    check_stop(out);write(folder/'repair.json',record)
+    verify_runner(out,plan)
+    print(f'STATIC-WIRE REPAIR REGISTERED. {len(jobs)} completed jobs verified and retained. '
+          'Models, frozen inputs and original study unchanged. Run all to resume.',flush=True)
 
 
 def protocol(profile):
@@ -345,7 +411,11 @@ def train(out,plan,args):
 def wire(values):
     a,*rest=map(float,values);w=rest[:3];t=rest[3:]
     require(len(values)==7 and .05<=a<=.95 and all(.1<=x<=.9 for x in w) and all(20<=x<=95 for x in t),'Invalid static configuration')
-    return 'ALPHA:'+str(a)+'|'+'|'.join(f'{i}:{w[i]}:{1-w[i]}:{t[i]}' for i in range(3))
+    # Validate the actual candidate first. Only its redundant complement needs
+    # endpoint protection: binary floating point makes 1 - 0.9 < 0.1. Java uses
+    # wLoad to set both weights after parsing, so this changes no valid action.
+    distance=[max(.1,min(.9,1-x)) for x in w]
+    return 'ALPHA:'+str(a)+'|'+'|'.join(f'{i}:{w[i]}:{distance[i]}:{t[i]}' for i in range(3))
 
 
 def normalized(x,low,high):return min(1.,max(0.,(x-low)/(high-low)))
@@ -483,7 +553,7 @@ def package(out):
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('stage',choices=['prepare','collect','train','tune-static','pilot','adaptation','all','status','stop','package'])
+    parser.add_argument('stage',choices=['prepare','collect','train','tune-static','pilot','adaptation','all','status','stop','package','repair-static-wire'])
     parser.add_argument('--output',type=Path,default=REPO/'ThreeBrains/sim_results/v5_deadline_pilot')
     parser.add_argument('--profile',choices=['pilot','smoke'],default='pilot')
     parser.add_argument('--java');parser.add_argument('--allow-unready-models',action='store_true',help='Diagnostic override only; logged per simulation.')
@@ -507,7 +577,8 @@ def main():
             plan=load_plan(out);require(plan['profile']==args.profile,'Profile mismatch')
             require(versions()==plan['package_versions'],'Python dependency versions changed; prepare a new output for a new environment')
             require(plan['output']==str(out),'Resume in the original output location')
-            require(sha(__file__)==plan['runner_sha'],'Runner changed; preserve this study and prepare a new output')
+            if args.stage=='repair-static-wire':repair_static_wire(out,plan);return
+            verify_runner(out,plan)
             verify(out,plan['input_hashes'])
             operations={'collect':collect,'train':train,'tune-static':tune,'pilot':evaluate,
                         'adaptation':lambda o,p,a:evaluate(o,p,a,True)}

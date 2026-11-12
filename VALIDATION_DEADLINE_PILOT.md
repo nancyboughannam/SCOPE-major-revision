@@ -46,3 +46,37 @@ before a reporting message; those prefixes must not cause rows to be discarded.
 
 The full 60-minute development profile, its newly collected model quality, and
 the scientific comparison are intentionally left to the user's local test run.
+
+## Static-wire repair validation — 12 November 2026
+
+The first full-profile local run exposed a static-configuration serialization
+bug: the complement of `0.9` was sent as `0.09999999999999998`. The Java bounds
+check rejected it before the simulation started. The repaired launcher clamps
+the redundant complement to the already validated weight range. No Java,
+routing, model, candidate-selection or experimental-protocol change is included.
+
+- Reproduced the exact Java exception using the failed configuration and the
+  supplied frozen Java runtime. With only the corrected serialization, the same
+  60-minute, 900-vehicle, iteration-3201 static scenario completed successfully
+  and yielded all 177 application reporting windows. This is a bug reproduction
+  and repair check, not evidence of adaptive-policy superiority.
+- The actual Java reply parser accepted 649 generated configurations covering
+  weight/alpha/threshold boundaries and the failing candidate, with exactly
+  unchanged alpha, load weights and thresholds. Genuinely invalid candidates,
+  including floats immediately outside the weight bounds, remain rejected.
+- The original 14 workflow/schema tests and 11 new interoperability/repair tests
+  passed. Repair tests cover preserved evidence, a new retry attempt, idempotence,
+  interruption before the atomic audit record, changed input/result/shortlist
+  rejection, unknown runner rejection, and rejection of later runner changes.
+- Verified all 159 frozen-input hashes and 835 files in the 55 completed-job
+  receipts from the supplied full-profile archive. The recorded model readiness
+  is `READY_FOR_OPTIMIZER_INTEGRATION_TEST`; no quality-gate override is needed.
+- Replayed registration on a separate copy of that archive: all 1,065 original
+  extracted regular files remained byte-identical. The 50 collection jobs,
+  training job and four completed calibration jobs were skipped; the failed
+  calibration received a new `attempt_002` directory. The original study and
+  checksum remain unchanged; a separate audited runner repair permits resume.
+
+The remaining calibration, pilot comparisons and adaptation scenarios still
+need to finish on the user's Mac. Their outcomes have not been inferred from
+the collection metrics or the successful serialization repair.

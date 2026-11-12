@@ -128,6 +128,8 @@ Use `collect`, `train`, `tune-static`, `pilot` or `adaptation` in place of `all`
 Stages check their prerequisites. No input, source, registered setting or model
 may change within an existing study. Prepare a new `--output` folder if changing
 the implementation or protocol; do not edit the checksums to bypass this rule.
+The narrowly scoped static-wire repair below is an explicit, recorded exception
+for launcher serialization only. It does not replace any frozen study input.
 If you choose a custom `--output`, repeat that option on every command, including
 `stop`, `status` and `package`.
 
@@ -137,6 +139,44 @@ Example:
 ../SCOPE-major-revision/FLaskAPIs/.venv-revision/bin/python \
   FLaskAPIs/run_deadline_pilot.py collect
 ```
+
+## Resume the static-weight endpoint failure
+
+The first published runner could write `0.09999999999999998` for the complement
+of a valid weight of `0.9`. Java correctly rejected that wire value as below
+`0.1`. This stopped static calibration at initialization; it does not invalidate
+completed collection, training or calibration. The fix clamps only the redundant
+complement after validating the actual candidate. Java's bounds remain strict,
+and the candidate's load weight, alpha and thresholds remain unchanged.
+
+In the Mac terminal, with the runner stopped:
+
+```bash
+cd ~/Documents/SCOPE-v5-testing &&
+git pull --ff-only &&
+../SCOPE-major-revision/FLaskAPIs/.venv-revision/bin/python \
+  FLaskAPIs/run_deadline_pilot.py repair-static-wire
+```
+
+This command accepts only the exact original runner version. It verifies the
+frozen inputs, completed jobs and registered shortlist, then saves the repaired
+launcher and an audit record in `repairs/static_wire_v1`. The original study,
+checksums, Java classes, Python services, trained models and completed attempts
+are retained byte for byte. It starts no simulations. Repeating it is safe.
+Studies freshly prepared with the fixed runner need no repair registration.
+
+Then resume:
+
+```bash
+caffeinate -i ../SCOPE-major-revision/FLaskAPIs/.venv-revision/bin/python \
+  FLaskAPIs/run_deadline_pilot.py all
+```
+
+Completed jobs are verified and skipped. A failed `attempt_001` remains intact;
+the retry uses `attempt_002`. Do not rerun preparation, delete the output folder,
+edit `static.txt`, change the shortlist, or bypass the model-readiness gate.
+Ctrl+C and the `stop` command continue to work as described above. Later code
+changes are still rejected; this repair is not a general integrity-check bypass.
 
 ## Results and MATLAB
 
