@@ -128,7 +128,7 @@ public class VehicularLoadGenerator extends LoadGeneratorModel {
                 taskList.add(new TaskProperty(virtualTime, i, randomTaskType, pesNumber, length, inputFileSize, outputFileSize));
             }
         }
-        if (System.getProperty("scope.workload.shiftSeconds") != null) {
+        if (System.getProperty("scope.workload.shiftSeconds") != null || Boolean.getBoolean("scope.auditWorkload")) {
             // Include every scheduled task field, without consuming any RNG draws.
             // Equal fingerprints are required for adaptive/frozen comparisons.
             try {
@@ -150,7 +150,7 @@ public class VehicularLoadGenerator extends LoadGeneratorModel {
                         + " app_rate_multipliers=" + System.getProperty("scope.workload.appRateMultipliers")
                         + " scheduled_tasks=" + taskList.size() + " sha256=" + hash);
                 long[][] phaseCounts = new long[arrivalSchedules.length][2];
-                double shift = Double.parseDouble(System.getProperty("scope.workload.shiftSeconds"));
+                double shift = Double.parseDouble(System.getProperty("scope.workload.shiftSeconds", Double.toString(simulationTime)));
                 for (TaskProperty task : taskList) {
                     if (task.getStartTime() < simulationTime) {
                         phaseCounts[task.getTaskType()][task.getStartTime() < shift ? 0 : 1]++;

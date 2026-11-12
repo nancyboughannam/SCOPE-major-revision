@@ -39,7 +39,7 @@ import numpy as np
 import pandas as pd
 import xgboost as xgb
 from flask import Flask, jsonify, request
-from scope_objective import manifest_support, check_telemetry
+from scope_objective import manifest_support, check_telemetry, check_routing, LEGACY_ROUTING
 
 
 APP_COUNT = 3
@@ -710,6 +710,7 @@ def health():
             "normalization": NORMALIZATION,
             "normalization_source": NORMALIZATION_SOURCE,
             "telemetry_schema": MANIFEST.get('telemetry_schema', 'legacy_first_vm_v1'),
+            "routing_schema": MANIFEST.get('routing_schema', LEGACY_ROUTING),
             "candidate_count": len(CANDIDATE_CATALOGUE),
             "lambda": LAMBDA,
             "w_failure": W_FAILURE,
@@ -736,6 +737,7 @@ def optimize():
         if not isinstance(data, dict):
             raise ValueError("Request body must be a JSON object")
         check_telemetry(MANIFEST, data.get('telemetry_schema'))
+        check_routing(MANIFEST, data.get('routing_schema'))
 
         settings = _resolve_objective_settings(data)
         optimizer_start = time.perf_counter()
